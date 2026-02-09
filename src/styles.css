@@ -1,0 +1,102 @@
+:root {
+  color-scheme: light;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  line-height: 1.4;
+  color: #1f241f;
+  background-color: #f3f0e9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at 15% 10%, #fff8ef, #f3f0e9 55%);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid #b6ad9c;
+  background-color: #eee8dc;
+}
+
+.toolbar-left,
+.toolbar-right {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.toolbar button {
+  border: 1px solid #4b463c;
+  background: #faf6ee;
+  color: #2b2a25;
+  padding: 0.5rem 0.8rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.toolbar button.active {
+  background-color: #334e3c;
+  color: #fff;
+}
+
+.toolbar button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.canvas-wrap {
+  min-height: 420px;
+  padding: 0.75rem;
+}
+
+.linkage-canvas {
+  width: 100%;
+  height: calc(100vh - 170px);
+  min-height: 420px;
+  border: 1px solid #8f887a;
+  background: #f8f8f6;
+  touch-action: none;
+}
+
+.statusbar {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.6rem 1rem;
+  border-top: 1px solid #b6ad9c;
+  background-color: #eee8dc;
+  font-size: 0.95rem;
+}
+
+.scene-debug {
+  display: none;
+}
+
+@media (max-width: 860px) {
+  .linkage-canvas {
+    height: calc(100vh - 210px);
+  }
+
+  .statusbar {
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+  }
+}
