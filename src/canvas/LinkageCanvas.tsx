@@ -237,6 +237,16 @@ export function LinkageCanvas({
           activeInteractionRef.current = 'circle';
           canvas.setPointerCapture(event.pointerId);
         }
+        return;
+      }
+
+      if (tool === 'idle') {
+        const dragStart = store.tryBeginDragAt(point);
+        if (dragStart.ok) {
+          activePointerIdRef.current = event.pointerId;
+          activeInteractionRef.current = 'drag';
+          canvas.setPointerCapture(event.pointerId);
+        }
       }
     },
     [store, tool]

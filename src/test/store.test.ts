@@ -384,7 +384,7 @@ describe('createSceneStore', () => {
     store.endDrag();
   });
 
-  it('snaps a dragged pivot to a nearby line and keeps it constrained on later drags', () => {
+  it('keeps a line-constrained pivot constrained under mostly tangential dragging', () => {
     const store = createSceneStore();
     store.addStick({ x: 100, y: 120 }, { x: 200, y: 120 });
 
@@ -406,11 +406,35 @@ describe('createSceneStore', () => {
     expect(snapped.pos.x).toBeCloseTo(150, 3);
 
     expect(store.beginDrag(movingId!).ok).toBe(true);
-    expect(store.updateDrag({ x: 230, y: 210 }).ok).toBe(true);
+    expect(store.updateDrag({ x: 154, y: 240 }).ok).toBe(true);
     expect(store.endDrag().ok).toBe(true);
 
     const afterSecondDrag = store.getState().scene.nodes[movingId!];
     expect(afterSecondDrag.pos.x).toBeCloseTo(150, 3);
+  });
+
+  it('releases a line-constrained pivot when dragged mostly normal to the line', () => {
+    const store = createSceneStore();
+    store.addStick({ x: 100, y: 120 }, { x: 200, y: 120 });
+
+    expect(store.beginLine({ x: 150, y: 40 }).ok).toBe(true);
+    expect(store.endLine({ x: 150, y: 220 }).ok).toBe(true);
+
+    const movingId = Object.values(store.getState().scene.nodes).find((node) => node.pos.x > 150)?.id;
+    expect(movingId).toBeDefined();
+
+    expect(store.beginDrag(movingId!).ok).toBe(true);
+    expect(store.updateDrag({ x: 158, y: 165 }).ok).toBe(true);
+    expect(store.endDrag().ok).toBe(true);
+    expect(store.getState().scene.nodes[movingId!].lineConstraintId).toBeDefined();
+
+    expect(store.beginDrag(movingId!).ok).toBe(true);
+    expect(store.updateDrag({ x: 230, y: 165 }).ok).toBe(true);
+    expect(store.endDrag().ok).toBe(true);
+
+    const released = store.getState().scene.nodes[movingId!];
+    expect(released.lineConstraintId).toBeNull();
+    expect(released.pos.x).toBeGreaterThan(170);
   });
 
   it('clears node constraints when a selected line is deleted', () => {
@@ -439,7 +463,7 @@ describe('createSceneStore', () => {
     expect(afterDelete.scene.nodes[movingId!].lineConstraintId).toBeNull();
   });
 
-  it('snaps a dragged pivot to a nearby circle and keeps it constrained on later drags', () => {
+  it('keeps a circle-constrained pivot constrained under mostly tangential dragging', () => {
     const store = createSceneStore();
     store.addStick({ x: 240, y: 220 }, { x: 340, y: 220 });
 
@@ -462,7 +486,7 @@ describe('createSceneStore', () => {
     expect(Math.abs(distance(snapped.pos, circle.center) - circle.radius)).toBeLessThan(0.8);
 
     expect(store.beginDrag(movingId!).ok).toBe(true);
-    expect(store.updateDrag({ x: 420, y: 220 }).ok).toBe(true);
+    expect(store.updateDrag({ x: 302, y: 305 }).ok).toBe(true);
     expect(store.endDrag().ok).toBe(true);
 
     const afterSecondDrag = store.getState().scene.nodes[movingId!];
@@ -470,6 +494,32 @@ describe('createSceneStore', () => {
     expect(Math.abs(distance(afterSecondDrag.pos, circleAfter.center) - circleAfter.radius)).toBeLessThan(
       0.8
     );
+  });
+
+  it('releases a circle-constrained pivot when dragged mostly normal to the circle', () => {
+    const store = createSceneStore();
+    store.addStick({ x: 240, y: 220 }, { x: 340, y: 220 });
+
+    expect(store.beginCircle({ x: 220, y: 220 }).ok).toBe(true);
+    expect(store.endCircle({ x: 300, y: 220 }).ok).toBe(true);
+
+    const movingId = Object.values(store.getState().scene.nodes).find((node) => node.pos.x > 300)?.id;
+    expect(movingId).toBeDefined();
+
+    expect(store.beginDrag(movingId!).ok).toBe(true);
+    expect(store.updateDrag({ x: 298, y: 222 }).ok).toBe(true);
+    expect(store.endDrag().ok).toBe(true);
+    expect(store.getState().scene.nodes[movingId!].circleConstraintId).toBeDefined();
+
+    expect(store.beginDrag(movingId!).ok).toBe(true);
+    expect(store.updateDrag({ x: 420, y: 220 }).ok).toBe(true);
+    expect(store.endDrag().ok).toBe(true);
+
+    const after = store.getState();
+    const released = after.scene.nodes[movingId!];
+    const circle = Object.values(after.scene.circles)[0];
+    expect(released.circleConstraintId).toBeNull();
+    expect(Math.abs(distance(released.pos, circle.center) - circle.radius)).toBeGreaterThan(10);
   });
 
   it('clears node constraints when a selected circle is deleted', () => {

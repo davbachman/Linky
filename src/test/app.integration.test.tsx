@@ -358,6 +358,38 @@ describe('App integration', () => {
     expect(circleButton.disabled).toBe(false);
   });
 
+  it('allows dragging a free pivot to inject motion while physics is enabled', () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId('tool-stick'));
+    drawStick(100, 100, 200, 100, 1);
+
+    fireEvent.click(screen.getByTestId('physics-play'));
+    expect(screen.getByTestId('physics-mode')).toHaveTextContent('play');
+
+    const target = canvas();
+    const before = parseScene();
+    const moving = Object.values(before.nodes).find((node) => !node.anchored && node.pos.x > 150);
+    expect(moving).toBeDefined();
+
+    fireEvent.pointerDown(target, { clientX: moving!.pos.x, clientY: moving!.pos.y, pointerId: 2 });
+    fireEvent.pointerMove(target, {
+      clientX: moving!.pos.x + 45,
+      clientY: moving!.pos.y + 30,
+      pointerId: 2
+    });
+    fireEvent.pointerUp(target, {
+      clientX: moving!.pos.x + 45,
+      clientY: moving!.pos.y + 30,
+      pointerId: 2
+    });
+
+    const after = parseScene();
+    const moved = after.nodes[moving!.id];
+    expect(moved.pos.x).not.toBeCloseTo(moving!.pos.x, 2);
+    expect(moved.pos.y).not.toBeCloseTo(moving!.pos.y, 2);
+  });
+
   it('creates/selects/resizes/deletes lines in line mode', () => {
     render(<App />);
 
@@ -400,7 +432,7 @@ describe('App integration', () => {
     expect(Object.keys(scene.lines)).toHaveLength(0);
   });
 
-  it('snaps dragged pivots to lines and keeps them constrained', () => {
+  it('keeps line-constrained pivots constrained under mostly tangential dragging', () => {
     render(<App />);
 
     fireEvent.click(screen.getByTestId('tool-stick'));
@@ -429,11 +461,43 @@ describe('App integration', () => {
       target,
       { clientX: afterFirstDrag.nodes[moving!.id].pos.x, clientY: afterFirstDrag.nodes[moving!.id].pos.y, pointerId: 4 }
     );
-    fireEvent.pointerMove(target, { clientX: 235, clientY: 210, pointerId: 4 });
-    fireEvent.pointerUp(target, { clientX: 235, clientY: 210, pointerId: 4 });
+    fireEvent.pointerMove(target, { clientX: 154, clientY: 240, pointerId: 4 });
+    fireEvent.pointerUp(target, { clientX: 154, clientY: 240, pointerId: 4 });
 
     const afterSecondDrag = parseScene();
     expect(afterSecondDrag.nodes[moving!.id].pos.x).toBeCloseTo(150, 1);
+  });
+
+  it('releases line constraints when dragging mostly normal to the line', () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId('tool-stick'));
+    drawStick(100, 120, 220, 120, 1);
+
+    fireEvent.click(screen.getByTestId('tool-line'));
+    drawLine(150, 40, 150, 220, 2);
+    fireEvent.click(screen.getByTestId('tool-line'));
+
+    const target = canvas();
+    const before = parseScene();
+    const moving = Object.values(before.nodes).find((node) => node.pos.x > 150);
+    expect(moving).toBeDefined();
+
+    fireEvent.pointerDown(target, { clientX: moving!.pos.x, clientY: moving!.pos.y, pointerId: 3 });
+    fireEvent.pointerMove(target, { clientX: 158, clientY: 165, pointerId: 3 });
+    fireEvent.pointerUp(target, { clientX: 158, clientY: 165, pointerId: 3 });
+    expect(parseScene().nodes[moving!.id].lineConstraintId).toBeDefined();
+
+    fireEvent.pointerDown(
+      target,
+      { clientX: parseScene().nodes[moving!.id].pos.x, clientY: parseScene().nodes[moving!.id].pos.y, pointerId: 4 }
+    );
+    fireEvent.pointerMove(target, { clientX: 235, clientY: 165, pointerId: 4 });
+    fireEvent.pointerUp(target, { clientX: 235, clientY: 165, pointerId: 4 });
+
+    const after = parseScene().nodes[moving!.id];
+    expect(after.lineConstraintId).toBeNull();
+    expect(after.pos.x).toBeGreaterThan(170);
   });
 
   it('creates/selects/resizes/deletes circles in circle mode', () => {
@@ -476,7 +540,7 @@ describe('App integration', () => {
     expect(Object.keys(scene.circles)).toHaveLength(0);
   });
 
-  it('snaps dragged pivots to circles and keeps them constrained', () => {
+  it('keeps circle-constrained pivots constrained under mostly tangential dragging', () => {
     render(<App />);
 
     fireEvent.click(screen.getByTestId('tool-stick'));
@@ -508,8 +572,8 @@ describe('App integration', () => {
       target,
       { clientX: afterFirstDrag.nodes[moving!.id].pos.x, clientY: afterFirstDrag.nodes[moving!.id].pos.y, pointerId: 4 }
     );
-    fireEvent.pointerMove(target, { clientX: 420, clientY: 220, pointerId: 4 });
-    fireEvent.pointerUp(target, { clientX: 420, clientY: 220, pointerId: 4 });
+    fireEvent.pointerMove(target, { clientX: 302, clientY: 305, pointerId: 4 });
+    fireEvent.pointerUp(target, { clientX: 302, clientY: 305, pointerId: 4 });
 
     const afterSecondDrag = parseScene();
     const constrainedAgain = afterSecondDrag.nodes[moving!.id];
@@ -518,5 +582,40 @@ describe('App integration', () => {
       distance(constrainedAgain.pos, circleAfter.center) - circleAfter.radius
     );
     expect(secondRadiusError).toBeLessThan(1.5);
+  });
+
+  it('releases circle constraints when dragging mostly normal to the circle', () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId('tool-stick'));
+    drawStick(260, 220, 360, 220, 1);
+
+    fireEvent.click(screen.getByTestId('tool-circle'));
+    drawLine(220, 220, 300, 220, 2);
+    fireEvent.click(screen.getByTestId('tool-circle'));
+
+    const target = canvas();
+    const before = parseScene();
+    const moving = Object.values(before.nodes).find((node) => node.pos.x > 300);
+    expect(moving).toBeDefined();
+
+    fireEvent.pointerDown(target, { clientX: moving!.pos.x, clientY: moving!.pos.y, pointerId: 3 });
+    fireEvent.pointerMove(target, { clientX: 298, clientY: 222, pointerId: 3 });
+    fireEvent.pointerUp(target, { clientX: 298, clientY: 222, pointerId: 3 });
+    expect(parseScene().nodes[moving!.id].circleConstraintId).toBeDefined();
+
+    fireEvent.pointerDown(
+      target,
+      { clientX: parseScene().nodes[moving!.id].pos.x, clientY: parseScene().nodes[moving!.id].pos.y, pointerId: 4 }
+    );
+    fireEvent.pointerMove(target, { clientX: 420, clientY: 220, pointerId: 4 });
+    fireEvent.pointerUp(target, { clientX: 420, clientY: 220, pointerId: 4 });
+
+    const afterScene = parseScene();
+    const after = afterScene.nodes[moving!.id];
+    const circle = Object.values(afterScene.circles)[0];
+    const radiusError = Math.abs(distance(after.pos, circle.center) - circle.radius);
+    expect(after.circleConstraintId).toBeNull();
+    expect(radiusError).toBeGreaterThan(10);
   });
 });

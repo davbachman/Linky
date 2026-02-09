@@ -45,6 +45,9 @@ const PHYSICS_CONSTRAINT_ITERATIONS = 30;
 const PHYSICS_MAX_STEP_SECONDS = 1 / 120;
 const DRAG_VELOCITY_MIN_DT_SECONDS = 1 / 240;
 const PHYSICS_ENERGY_EPSILON = 1e-9;
+const CONSTRAINT_RELEASE_DISTANCE = 16;
+const CONSTRAINT_RELEASE_DIRECTION_RATIO = 1.25;
+const CONSTRAINT_RELEASE_MIN_STEP = 1.5;
 
 export type SnapResult = {
   nodeId: string;
@@ -267,6 +270,64 @@ function getNowMs(): number {
   return Date.now();
 }
 
+function dot(a: Vec2, b: Vec2): number {
+  return a.x * b.x + a.y * b.y;
+}
+
+function normalize(v: Vec2): Vec2 | null {
+  const len = Math.hypot(v.x, v.y);
+  if (len <= 1e-9) {
+    return null;
+  }
+  return { x: v.x / len, y: v.y / len };
+}
+
+function shouldReleaseFromLine(line: { a: Vec2; b: Vec2 }, previousRaw: Vec2, raw: Vec2): boolean {
+  const tangent = normalize({ x: line.b.x - line.a.x, y: line.b.y - line.a.y });
+  if (!tangent) {
+    return false;
+  }
+
+  const normal = { x: -tangent.y, y: tangent.x };
+  const rawDelta = { x: raw.x - previousRaw.x, y: raw.y - previousRaw.y };
+  const projected = projectPointToInfiniteLine(raw, line.a, line.b);
+  const offset = distance(raw, projected);
+  const normalStep = Math.abs(dot(rawDelta, normal));
+  const tangentStep = Math.abs(dot(rawDelta, tangent));
+
+  return (
+    offset >= CONSTRAINT_RELEASE_DISTANCE &&
+    normalStep >= CONSTRAINT_RELEASE_MIN_STEP &&
+    normalStep >= tangentStep * CONSTRAINT_RELEASE_DIRECTION_RATIO
+  );
+}
+
+function shouldReleaseFromCircle(
+  circle: { center: Vec2; radius: number },
+  nodePos: Vec2,
+  previousRaw: Vec2,
+  raw: Vec2
+): boolean {
+  const radial =
+    normalize({ x: nodePos.x - circle.center.x, y: nodePos.y - circle.center.y }) ??
+    normalize({ x: raw.x - circle.center.x, y: raw.y - circle.center.y });
+  if (!radial) {
+    return false;
+  }
+
+  const tangent = { x: -radial.y, y: radial.x };
+  const rawDelta = { x: raw.x - previousRaw.x, y: raw.y - previousRaw.y };
+  const radiusError = Math.abs(distance(raw, circle.center) - circle.radius);
+  const normalStep = Math.abs(dot(rawDelta, radial));
+  const tangentStep = Math.abs(dot(rawDelta, tangent));
+
+  return (
+    radiusError >= CONSTRAINT_RELEASE_DISTANCE &&
+    normalStep >= CONSTRAINT_RELEASE_MIN_STEP &&
+    normalStep >= tangentStep * CONSTRAINT_RELEASE_DIRECTION_RATIO
+  );
+}
+
 function enforceComponentConstraints(
   scene: Scene,
   nodeIds: string[],
@@ -378,7 +439,8 @@ export function createSceneStore(): SceneStore {
     tool: 'idle',
     drag: {
       activeNodeId: null,
-      pointer: null
+      pointer: null,
+      rawPointer: null
     },
     createStick: {
       startNodeId: null,
@@ -536,6 +598,7 @@ export function createSceneStore(): SceneStore {
     }
     state.drag.activeNodeId = nodeId;
     state.drag.pointer = { x: node.pos.x, y: node.pos.y };
+    state.drag.rawPointer = { x: node.pos.x, y: node.pos.y };
     lastDragUpdateMs = null;
     ensureVelocityNode(nodeId);
     emit();
@@ -693,6 +756,7 @@ export function createSceneStore(): SceneStore {
       state.tool = mode;
       state.drag.activeNodeId = null;
       state.drag.pointer = null;
+      state.drag.rawPointer = null;
       clearStickResize(state);
       clearLineResize(state);
       clearCircleResize(state);
@@ -761,12 +825,18 @@ export function createSceneStore(): SceneStore {
         return { ok: false, reason: 'Active node does not exist.' };
       }
 
-      let constrainedPointer = { x: pointer.x, y: pointer.y };
+      const rawPointer = { x: pointer.x, y: pointer.y };
+      const previousRawPointer = state.drag.rawPointer ?? { x: rawPointer.x, y: rawPointer.y };
+      let constrainedPointer = { x: rawPointer.x, y: rawPointer.y };
       if (activeNode.lineConstraintId) {
         const line = state.scene.lines[activeNode.lineConstraintId];
         if (line) {
-          constrainedPointer = projectPointToInfiniteLine(constrainedPointer, line.a, line.b);
-          activeNode.circleConstraintId = null;
+          if (shouldReleaseFromLine(line, previousRawPointer, rawPointer)) {
+            activeNode.lineConstraintId = null;
+          } else {
+            constrainedPointer = projectPointToInfiniteLine(constrainedPointer, line.a, line.b);
+            activeNode.circleConstraintId = null;
+          }
         } else {
           activeNode.lineConstraintId = null;
         }
@@ -775,7 +845,11 @@ export function createSceneStore(): SceneStore {
       if (!activeNode.lineConstraintId && activeNode.circleConstraintId) {
         const circle = state.scene.circles[activeNode.circleConstraintId];
         if (circle) {
-          constrainedPointer = projectPointToCircle(constrainedPointer, circle.center, circle.radius);
+          if (shouldReleaseFromCircle(circle, activeNode.pos, previousRawPointer, rawPointer)) {
+            activeNode.circleConstraintId = null;
+          } else {
+            constrainedPointer = projectPointToCircle(constrainedPointer, circle.center, circle.radius);
+          }
         } else {
           activeNode.circleConstraintId = null;
         }
@@ -837,6 +911,7 @@ export function createSceneStore(): SceneStore {
         y: constrainedPointer.y - previousPointer.y
       };
       state.drag.pointer = { x: constrainedPointer.x, y: constrainedPointer.y };
+      state.drag.rawPointer = { x: rawPointer.x, y: rawPointer.y };
 
       const component = getConnectedComponent(state.scene, activeNodeId);
       const previousPositions: Record<string, Vec2> = {};
@@ -951,6 +1026,7 @@ export function createSceneStore(): SceneStore {
       }
       state.drag.activeNodeId = null;
       state.drag.pointer = null;
+      state.drag.rawPointer = null;
       lastDragUpdateMs = null;
       emit();
       return { ok: true };
@@ -1627,6 +1703,7 @@ export function createSceneStore(): SceneStore {
         state.tool = 'idle';
         state.drag.activeNodeId = null;
         state.drag.pointer = null;
+        state.drag.rawPointer = null;
         lastDragUpdateMs = null;
         pruneVelocities();
         // Enter physics from a zero-momentum state while still satisfying rigid constraints.
@@ -1645,6 +1722,7 @@ export function createSceneStore(): SceneStore {
       } else {
         state.drag.activeNodeId = null;
         state.drag.pointer = null;
+        state.drag.rawPointer = null;
         lastDragUpdateMs = null;
       }
 

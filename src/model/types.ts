@@ -42,6 +42,7 @@ export type Scene = {
 export type DragState = {
   activeNodeId: string | null;
   pointer: Vec2 | null;
+  rawPointer: Vec2 | null;
 };
 
 export type SelectionState = {
