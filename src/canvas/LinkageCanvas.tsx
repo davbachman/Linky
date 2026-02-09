@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 
-import { DEFAULT_SNAP_RADIUS, hitTestPivot } from '../model/hitTest';
 import { renderScene } from '../model/render';
 import type {
   CreateStickState,
@@ -135,26 +134,11 @@ export function LinkageCanvas({
       activeInteractionRef.current = null;
       activePointerIdRef.current = null;
     }
-    if (tool !== 'stick' && activeInteractionRef.current === 'resize-stick') {
-      store.endSelectedStickResize();
-      activeInteractionRef.current = null;
-      activePointerIdRef.current = null;
-    }
     if (tool !== 'line' && activeInteractionRef.current === 'line') {
       activeInteractionRef.current = null;
       activePointerIdRef.current = null;
     }
-    if (tool !== 'line' && activeInteractionRef.current === 'resize-line') {
-      store.endSelectedLineResize();
-      activeInteractionRef.current = null;
-      activePointerIdRef.current = null;
-    }
     if (tool !== 'circle' && activeInteractionRef.current === 'circle') {
-      activeInteractionRef.current = null;
-      activePointerIdRef.current = null;
-    }
-    if (tool !== 'circle' && activeInteractionRef.current === 'resize-circle') {
-      store.endSelectedCircleResize();
       activeInteractionRef.current = null;
       activePointerIdRef.current = null;
     }
@@ -174,20 +158,35 @@ export function LinkageCanvas({
 
       const point = getCanvasPoint(event, canvas);
 
-      if (tool === 'stick') {
-        const resizeStart = store.tryBeginSelectedStickResizeAt(point);
-        if (resizeStart.ok) {
-          activePointerIdRef.current = event.pointerId;
-          activeInteractionRef.current = 'resize-stick';
-          canvas.setPointerCapture(event.pointerId);
-          return;
-        }
+      const beginStickResize = store.tryBeginSelectedStickResizeAt(point);
+      if (beginStickResize.ok) {
+        activePointerIdRef.current = event.pointerId;
+        activeInteractionRef.current = 'resize-stick';
+        canvas.setPointerCapture(event.pointerId);
+        return;
+      }
 
-        const pivotHit = hitTestPivot(scene.nodes, point, DEFAULT_SNAP_RADIUS);
-        if (pivotHit) {
-          store.clearSelectionForTool();
-          const createFromPivot = store.beginStick(point);
-          if (createFromPivot.ok) {
+      const beginLineResize = store.tryBeginSelectedLineResizeAt(point);
+      if (beginLineResize.ok) {
+        activePointerIdRef.current = event.pointerId;
+        activeInteractionRef.current = 'resize-line';
+        canvas.setPointerCapture(event.pointerId);
+        return;
+      }
+
+      const beginCircleResize = store.tryBeginSelectedCircleResizeAt(point);
+      if (beginCircleResize.ok) {
+        activePointerIdRef.current = event.pointerId;
+        activeInteractionRef.current = 'resize-circle';
+        canvas.setPointerCapture(event.pointerId);
+        return;
+      }
+
+      const selectionHit = store.selectAt(point);
+      if (selectionHit) {
+        if (tool === 'stick' && (selectionHit.kind === 'pivot' || selectionHit.kind === 'anchor')) {
+          const beginStick = store.beginStick(point);
+          if (beginStick.ok) {
             activePointerIdRef.current = event.pointerId;
             activeInteractionRef.current = 'stick';
             canvas.setPointerCapture(event.pointerId);
@@ -195,13 +194,25 @@ export function LinkageCanvas({
           return;
         }
 
-        const selectResult = store.tryHandleStickToolClick(point);
-        if (selectResult.ok) {
+        if (tool === 'anchor' && selectionHit.kind === 'pivot') {
+          store.setAnchor(selectionHit.id);
           return;
         }
 
-        const result = store.beginStick(point);
-        if (result.ok) {
+        if (tool === 'idle' && (selectionHit.kind === 'pivot' || selectionHit.kind === 'anchor')) {
+          const dragStart = store.beginDrag(selectionHit.id);
+          if (dragStart.ok) {
+            activePointerIdRef.current = event.pointerId;
+            activeInteractionRef.current = 'drag';
+            canvas.setPointerCapture(event.pointerId);
+          }
+        }
+        return;
+      }
+
+      if (tool === 'stick') {
+        const beginStick = store.beginStick(point);
+        if (beginStick.ok) {
           activePointerIdRef.current = event.pointerId;
           activeInteractionRef.current = 'stick';
           canvas.setPointerCapture(event.pointerId);
@@ -209,25 +220,7 @@ export function LinkageCanvas({
         return;
       }
 
-      if (tool === 'anchor') {
-        store.tryHandleAnchorToolClick(point);
-        return;
-      }
-
       if (tool === 'line') {
-        const beginResize = store.tryBeginSelectedLineResizeAt(point);
-        if (beginResize.ok) {
-          activePointerIdRef.current = event.pointerId;
-          activeInteractionRef.current = 'resize-line';
-          canvas.setPointerCapture(event.pointerId);
-          return;
-        }
-
-        const selectLine = store.tryHandleLineToolClick(point);
-        if (selectLine.ok) {
-          return;
-        }
-
         const beginLine = store.beginLine(point);
         if (beginLine.ok) {
           activePointerIdRef.current = event.pointerId;
@@ -238,36 +231,15 @@ export function LinkageCanvas({
       }
 
       if (tool === 'circle') {
-        const beginResize = store.tryBeginSelectedCircleResizeAt(point);
-        if (beginResize.ok) {
-          activePointerIdRef.current = event.pointerId;
-          activeInteractionRef.current = 'resize-circle';
-          canvas.setPointerCapture(event.pointerId);
-          return;
-        }
-
-        const selectCircle = store.tryHandleCircleToolClick(point);
-        if (selectCircle.ok) {
-          return;
-        }
-
         const beginCircle = store.beginCircle(point);
         if (beginCircle.ok) {
           activePointerIdRef.current = event.pointerId;
           activeInteractionRef.current = 'circle';
           canvas.setPointerCapture(event.pointerId);
         }
-        return;
-      }
-
-      const dragStart = store.tryBeginDragAt(point);
-      if (dragStart.ok) {
-        activePointerIdRef.current = event.pointerId;
-        activeInteractionRef.current = 'drag';
-        canvas.setPointerCapture(event.pointerId);
       }
     },
-    [scene.nodes, store, tool]
+    [store, tool]
   );
 
   const handlePointerMove = useCallback(

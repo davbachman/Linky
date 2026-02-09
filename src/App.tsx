@@ -45,27 +45,34 @@ export default function App({ store }: AppProps): JSX.Element {
         return;
       }
 
-      if (state.tool === 'anchor' && state.selection.anchorNodeId) {
+      if (state.selection.anchorNodeId) {
         event.preventDefault();
         sceneStore.deleteSelectedAnchor();
         return;
       }
 
-      if (state.tool === 'stick' && state.selection.stickId) {
+      if (state.selection.pivotNodeId) {
+        event.preventDefault();
+        sceneStore.deleteSelectedPivot();
+        return;
+      }
+
+      if (state.selection.stickId) {
         event.preventDefault();
         sceneStore.deleteSelectedStick();
         return;
       }
 
-      if (state.tool === 'line' && state.selection.lineId) {
+      if (state.selection.circleId) {
         event.preventDefault();
-        sceneStore.deleteSelectedLine();
+        sceneStore.deleteSelectedCircle();
         return;
       }
 
-      if (state.tool === 'circle' && state.selection.circleId) {
+      if (state.selection.lineId) {
         event.preventDefault();
-        sceneStore.deleteSelectedCircle();
+        sceneStore.deleteSelectedLine();
+        return;
       }
     };
 
@@ -77,10 +84,10 @@ export default function App({ store }: AppProps): JSX.Element {
     sceneStore,
     state.physics.enabled,
     state.selection.anchorNodeId,
+    state.selection.pivotNodeId,
     state.selection.circleId,
     state.selection.lineId,
-    state.selection.stickId,
-    state.tool
+    state.selection.stickId
   ]);
 
   useEffect(() => {

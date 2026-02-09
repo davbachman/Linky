@@ -114,6 +114,10 @@ function clearAnchorSelection(state: SceneStoreState): void {
   state.selection.anchorNodeId = null;
 }
 
+function clearPivotSelection(state: SceneStoreState): void {
+  state.selection.pivotNodeId = null;
+}
+
 function clearStickSelection(state: SceneStoreState): void {
   state.selection.stickId = null;
 }
@@ -153,6 +157,14 @@ function clearCircleResize(state: SceneStoreState): void {
   state.circleResize.active = false;
   state.circleResize.circleId = null;
   state.circleResize.mode = null;
+}
+
+function clearAllSelections(state: SceneStoreState): void {
+  clearAnchorSelection(state);
+  clearPivotSelection(state);
+  clearStickSelection(state);
+  clearLineSelection(state);
+  clearCircleSelection(state);
 }
 
 function hitTestSelectedStickEndpoint(
@@ -221,6 +233,31 @@ function hitTestSelectedCircleHandle(
   }
 
   return null;
+}
+
+function setAnchorSelection(state: SceneStoreState, nodeId: string): void {
+  clearAllSelections(state);
+  state.selection.anchorNodeId = nodeId;
+}
+
+function setPivotSelection(state: SceneStoreState, nodeId: string): void {
+  clearAllSelections(state);
+  state.selection.pivotNodeId = nodeId;
+}
+
+function setStickSelection(state: SceneStoreState, stickId: string): void {
+  clearAllSelections(state);
+  state.selection.stickId = stickId;
+}
+
+function setLineSelection(state: SceneStoreState, lineId: string): void {
+  clearAllSelections(state);
+  state.selection.lineId = lineId;
+}
+
+function setCircleSelection(state: SceneStoreState, circleId: string): void {
+  clearAllSelections(state);
+  state.selection.circleId = circleId;
 }
 
 function getNowMs(): number {
@@ -357,6 +394,7 @@ export function createSceneStore(): SceneStore {
     },
     selection: {
       anchorNodeId: null,
+      pivotNodeId: null,
       stickId: null,
       lineId: null,
       circleId: null
@@ -475,9 +513,15 @@ export function createSceneStore(): SceneStore {
       return { ok: false, reason: 'Node does not exist.' };
     }
     if (node.anchored) {
+      setAnchorSelection(state, nodeId);
+      clearStickResize(state);
+      clearLineResize(state);
+      clearCircleResize(state);
+      emit();
       return { ok: true };
     }
     node.anchored = true;
+    setAnchorSelection(state, nodeId);
     emit();
     return { ok: true };
   };
@@ -578,6 +622,46 @@ export function createSceneStore(): SceneStore {
     return { ok: true };
   };
 
+  const deletePivotById = (nodeId: string): Result => {
+    if (isEditLocked()) {
+      return { ok: false, reason: 'Pivot editing is disabled while physics is enabled.' };
+    }
+
+    const node = state.scene.nodes[nodeId];
+    if (!node) {
+      return { ok: false, reason: 'Pivot does not exist.' };
+    }
+    if (node.anchored) {
+      return { ok: false, reason: 'Anchors are deleted via anchor delete.' };
+    }
+
+    const incidentStickIds = Object.values(state.scene.sticks)
+      .filter((stick) => stick.a === nodeId || stick.b === nodeId)
+      .map((stick) => stick.id);
+
+    for (const stickId of incidentStickIds) {
+      const stick = state.scene.sticks[stickId];
+      if (!stick) {
+        continue;
+      }
+      delete state.scene.sticks[stickId];
+      removeNodeIfIsolated(state.scene, stick.a);
+      removeNodeIfIsolated(state.scene, stick.b);
+      if (state.selection.stickId === stickId) {
+        clearStickSelection(state);
+      }
+      if (state.stickResize.stickId === stickId) {
+        clearStickResize(state);
+      }
+    }
+
+    delete state.scene.nodes[nodeId];
+    clearPivotSelection(state);
+    pruneVelocities();
+    emit();
+    return { ok: true };
+  };
+
   return {
     getState(): SceneStoreState {
       return state;
@@ -613,18 +697,10 @@ export function createSceneStore(): SceneStore {
       clearLineResize(state);
       clearCircleResize(state);
 
-      if (mode !== 'anchor') {
-        clearAnchorSelection(state);
-      }
-      if (mode !== 'stick') {
-        clearStickSelection(state);
-      }
       if (mode !== 'line') {
-        clearLineSelection(state);
         clearLineCreateState(state);
       }
       if (mode !== 'circle') {
-        clearCircleSelection(state);
         clearCircleCreateState(state);
       }
       emit();
@@ -951,15 +1027,16 @@ export function createSceneStore(): SceneStore {
 
     clearSelectionForTool(): void {
       if (state.tool === 'anchor') {
-        if (state.selection.anchorNodeId) {
-          clearAnchorSelection(state);
+        if (state.selection.anchorNodeId || state.selection.pivotNodeId) {
+          clearAllSelections(state);
           emit();
         }
         return;
       }
       if (state.tool === 'stick') {
-        const hadSelection = state.selection.stickId || state.stickResize.active;
-        clearStickSelection(state);
+        const hadSelection =
+          state.selection.stickId || state.selection.anchorNodeId || state.selection.pivotNodeId;
+        clearAllSelections(state);
         clearStickResize(state);
         if (hadSelection) {
           emit();
@@ -967,8 +1044,15 @@ export function createSceneStore(): SceneStore {
         return;
       }
       if (state.tool === 'line') {
-        const hadSelection = state.selection.lineId || state.lineResize.active || state.createLine.start;
-        clearLineSelection(state);
+        const hadSelection =
+          state.selection.lineId ||
+          state.selection.anchorNodeId ||
+          state.selection.pivotNodeId ||
+          state.selection.stickId ||
+          state.selection.circleId ||
+          state.lineResize.active ||
+          state.createLine.start;
+        clearAllSelections(state);
         clearLineResize(state);
         clearLineCreateState(state);
         if (hadSelection) {
@@ -978,13 +1062,113 @@ export function createSceneStore(): SceneStore {
       }
       if (state.tool === 'circle') {
         const hadSelection =
-          state.selection.circleId || state.circleResize.active || state.createCircle.center;
-        clearCircleSelection(state);
+          state.selection.circleId ||
+          state.selection.anchorNodeId ||
+          state.selection.pivotNodeId ||
+          state.selection.stickId ||
+          state.selection.lineId ||
+          state.circleResize.active ||
+          state.createCircle.center;
+        clearAllSelections(state);
         clearCircleResize(state);
         clearCircleCreateState(state);
         if (hadSelection) {
           emit();
         }
+      }
+    },
+
+    selectAt(point) {
+      if (isEditLocked()) {
+        return null;
+      }
+
+      const pivotId = hitTestPivot(state.scene.nodes, point, PIVOT_HIT_RADIUS);
+      if (pivotId) {
+        const node = state.scene.nodes[pivotId];
+        if (node?.anchored) {
+          setAnchorSelection(state, pivotId);
+          clearStickResize(state);
+          clearLineResize(state);
+          clearCircleResize(state);
+          emit();
+          return { kind: 'anchor', id: pivotId } as const;
+        }
+        setPivotSelection(state, pivotId);
+        clearStickResize(state);
+        clearLineResize(state);
+        clearCircleResize(state);
+        emit();
+        return { kind: 'pivot', id: pivotId } as const;
+      }
+
+      const hitStickId = hitTestStick(state.scene, point, STICK_HIT_RADIUS);
+      if (hitStickId) {
+        setStickSelection(state, hitStickId);
+        clearStickResize(state);
+        clearLineResize(state);
+        clearCircleResize(state);
+        emit();
+        return { kind: 'stick', id: hitStickId } as const;
+      }
+
+      const hitCircleId = hitTestCircle(state.scene, point, CIRCLE_HIT_RADIUS);
+      if (hitCircleId) {
+        setCircleSelection(state, hitCircleId);
+        clearStickResize(state);
+        clearLineResize(state);
+        clearCircleResize(state);
+        clearCircleCreateState(state);
+        emit();
+        return { kind: 'circle', id: hitCircleId } as const;
+      }
+
+      const hitLineId = hitTestLine(state.scene, point, LINE_HIT_RADIUS);
+      if (hitLineId) {
+        setLineSelection(state, hitLineId);
+        clearStickResize(state);
+        clearLineResize(state);
+        clearCircleResize(state);
+        clearLineCreateState(state);
+        emit();
+        return { kind: 'line', id: hitLineId } as const;
+      }
+
+      const hadSelection =
+        state.selection.anchorNodeId ||
+        state.selection.pivotNodeId ||
+        state.selection.stickId ||
+        state.selection.lineId ||
+        state.selection.circleId ||
+        state.stickResize.active ||
+        state.lineResize.active ||
+        state.circleResize.active;
+      clearAllSelections(state);
+      clearStickResize(state);
+      clearLineResize(state);
+      clearCircleResize(state);
+      if (hadSelection) {
+        emit();
+      }
+      return null;
+    },
+
+    clearSelection(): void {
+      const hadSelection =
+        state.selection.anchorNodeId ||
+        state.selection.pivotNodeId ||
+        state.selection.stickId ||
+        state.selection.lineId ||
+        state.selection.circleId ||
+        state.stickResize.active ||
+        state.lineResize.active ||
+        state.circleResize.active;
+      clearAllSelections(state);
+      clearStickResize(state);
+      clearLineResize(state);
+      clearCircleResize(state);
+      if (hadSelection) {
+        emit();
       }
     },
 
@@ -994,8 +1178,8 @@ export function createSceneStore(): SceneStore {
       }
       const nodeId = hitTestPivot(state.scene.nodes, point, PIVOT_HIT_RADIUS);
       if (!nodeId) {
-        if (state.selection.anchorNodeId) {
-          clearAnchorSelection(state);
+        if (state.selection.anchorNodeId || state.selection.pivotNodeId) {
+          clearAllSelections(state);
           emit();
         }
         return { ok: false, reason: 'No pivot near click.' };
@@ -1003,11 +1187,11 @@ export function createSceneStore(): SceneStore {
 
       const node = state.scene.nodes[nodeId];
       if (!node.anchored) {
-        clearAnchorSelection(state);
+        clearAllSelections(state);
         return applyAnchorById(nodeId);
       }
 
-      state.selection.anchorNodeId = nodeId;
+      setAnchorSelection(state, nodeId);
       emit();
       return { ok: true };
     },
@@ -1018,14 +1202,14 @@ export function createSceneStore(): SceneStore {
       }
       const hitStickId = hitTestStick(state.scene, point, STICK_HIT_RADIUS);
       if (hitStickId) {
-        state.selection.stickId = hitStickId;
+        setStickSelection(state, hitStickId);
         clearStickResize(state);
         emit();
         return { ok: true };
       }
 
-      if (state.selection.stickId || state.stickResize.active) {
-        clearStickSelection(state);
+      if (state.selection.stickId || state.selection.anchorNodeId || state.selection.pivotNodeId || state.stickResize.active) {
+        clearAllSelections(state);
         clearStickResize(state);
         emit();
       }
@@ -1159,7 +1343,7 @@ export function createSceneStore(): SceneStore {
         a: { x: start.x, y: start.y },
         b: { x: end.x, y: end.y }
       };
-      state.selection.lineId = lineId;
+      setLineSelection(state, lineId);
       clearLineCreateState(state);
       emit();
       return { ok: true };
@@ -1171,15 +1355,15 @@ export function createSceneStore(): SceneStore {
       }
       const lineId = hitTestLine(state.scene, point, LINE_HIT_RADIUS);
       if (!lineId) {
-        if (state.selection.lineId || state.lineResize.active) {
-          clearLineSelection(state);
+        if (state.selection.lineId || state.selection.anchorNodeId || state.selection.pivotNodeId || state.selection.stickId || state.selection.circleId || state.lineResize.active) {
+          clearAllSelections(state);
           clearLineResize(state);
           emit();
         }
         return { ok: false, reason: 'No line near click.' };
       }
 
-      state.selection.lineId = lineId;
+      setLineSelection(state, lineId);
       clearLineResize(state);
       clearLineCreateState(state);
       emit();
@@ -1293,7 +1477,7 @@ export function createSceneStore(): SceneStore {
         center: { x: center.x, y: center.y },
         radius
       };
-      state.selection.circleId = circleId;
+      setCircleSelection(state, circleId);
       clearCircleCreateState(state);
       emit();
       return { ok: true };
@@ -1305,15 +1489,15 @@ export function createSceneStore(): SceneStore {
       }
       const circleId = hitTestCircle(state.scene, point, CIRCLE_HIT_RADIUS);
       if (!circleId) {
-        if (state.selection.circleId || state.circleResize.active) {
-          clearCircleSelection(state);
+        if (state.selection.circleId || state.selection.anchorNodeId || state.selection.pivotNodeId || state.selection.stickId || state.selection.lineId || state.circleResize.active) {
+          clearAllSelections(state);
           clearCircleResize(state);
           emit();
         }
         return { ok: false, reason: 'No circle near click.' };
       }
 
-      state.selection.circleId = circleId;
+      setCircleSelection(state, circleId);
       clearCircleResize(state);
       clearCircleCreateState(state);
       emit();
@@ -1385,6 +1569,14 @@ export function createSceneStore(): SceneStore {
       return deleteCircleById(circleId);
     },
 
+    deleteSelectedPivot(): Result {
+      const pivotId = state.selection.pivotNodeId;
+      if (!pivotId) {
+        return { ok: false, reason: 'No selected pivot.' };
+      }
+      return deletePivotById(pivotId);
+    },
+
     deleteSelectedAnchor(): Result {
       if (isEditLocked()) {
         return { ok: false, reason: 'Anchor editing is disabled while physics is enabled.' };
@@ -1402,7 +1594,7 @@ export function createSceneStore(): SceneStore {
       }
 
       node.anchored = false;
-      clearAnchorSelection(state);
+      setPivotSelection(state, node.id);
       emit();
       return { ok: true };
     },
@@ -1428,10 +1620,7 @@ export function createSceneStore(): SceneStore {
         } else if (state.tool === 'circle') {
           cancelCircleDraft();
         }
-        clearAnchorSelection(state);
-        clearStickSelection(state);
-        clearLineSelection(state);
-        clearCircleSelection(state);
+        clearAllSelections(state);
         clearStickResize(state);
         clearLineResize(state);
         clearCircleResize(state);

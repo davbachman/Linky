@@ -19,6 +19,7 @@ export const PIVOT_RADIUS = 3;
 export const ANCHOR_RADIUS = 8;
 const STICK_AURA_COLOR = 'rgba(30, 144, 255, 0.35)';
 const ANCHOR_AURA_COLOR = 'rgba(255, 80, 80, 0.45)';
+const PIVOT_AURA_COLOR = 'rgba(30, 144, 255, 0.45)';
 const LINE_COLOR = '#2b6ce6';
 const LINE_AURA_COLOR = 'rgba(43, 108, 230, 0.35)';
 const CIRCLE_COLOR = '#2b6ce6';
@@ -194,6 +195,17 @@ export function renderScene(
       ctx.beginPath();
       ctx.arc(selectedAnchor.pos.x, selectedAnchor.pos.y, ANCHOR_RADIUS + 4, 0, Math.PI * 2);
       ctx.strokeStyle = ANCHOR_AURA_COLOR;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+  }
+
+  if (selection.pivotNodeId) {
+    const selectedPivot = scene.nodes[selection.pivotNodeId];
+    if (selectedPivot && !selectedPivot.anchored) {
+      ctx.beginPath();
+      ctx.arc(selectedPivot.pos.x, selectedPivot.pos.y, PIVOT_RADIUS + 6, 0, Math.PI * 2);
+      ctx.strokeStyle = PIVOT_AURA_COLOR;
       ctx.lineWidth = 3;
       ctx.stroke();
     }

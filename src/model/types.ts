@@ -46,10 +46,18 @@ export type DragState = {
 
 export type SelectionState = {
   anchorNodeId: string | null;
+  pivotNodeId: string | null;
   stickId: string | null;
   lineId: string | null;
   circleId: string | null;
 };
+
+export type SelectionHit =
+  | { kind: 'anchor'; id: string }
+  | { kind: 'pivot'; id: string }
+  | { kind: 'stick'; id: string }
+  | { kind: 'line'; id: string }
+  | { kind: 'circle'; id: string };
 
 export type StickResizeState = {
   active: boolean;
@@ -127,6 +135,8 @@ export interface SceneStore {
   updateStickPreview(pointer: Vec2): Result;
   endStick(end: Vec2): Result;
   clearSelectionForTool(): void;
+  selectAt(point: Vec2): SelectionHit | null;
+  clearSelection(): void;
   tryHandleAnchorToolClick(point: Vec2): Result;
   tryHandleStickToolClick(point: Vec2): Result;
   tryBeginSelectedStickResizeAt(point: Vec2): Result;
@@ -148,6 +158,7 @@ export interface SceneStore {
   updateSelectedCircleResize(pointer: Vec2): Result;
   endSelectedCircleResize(): Result;
   deleteSelectedCircle(): Result;
+  deleteSelectedPivot(): Result;
   deleteSelectedAnchor(): Result;
   deleteSelectedStick(): Result;
   setPhysicsEnabled(enabled: boolean): void;
