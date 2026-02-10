@@ -78,6 +78,9 @@ export function hitTestStick(
   let bestDistance = Number.POSITIVE_INFINITY;
 
   for (const stick of Object.values(scene.sticks)) {
+    if (stick.visible === false) {
+      continue;
+    }
     const a = scene.nodes[stick.a]?.pos;
     const b = scene.nodes[stick.b]?.pos;
     if (!a || !b) {

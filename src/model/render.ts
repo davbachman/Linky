@@ -1,8 +1,9 @@
 import { distance } from './hitTest';
 import type {
-  CircleCreateState,
   CreateStickState,
   LineCreateState,
+  Pen,
+  PenTrailStroke,
   Scene,
   SelectionState
 } from './types';
@@ -22,24 +23,46 @@ const ANCHOR_AURA_COLOR = 'rgba(255, 80, 80, 0.45)';
 const PIVOT_AURA_COLOR = 'rgba(30, 144, 255, 0.45)';
 const LINE_COLOR = '#2b6ce6';
 const LINE_AURA_COLOR = 'rgba(43, 108, 230, 0.35)';
-const CIRCLE_COLOR = '#2b6ce6';
-const CIRCLE_AURA_COLOR = 'rgba(43, 108, 230, 0.35)';
+const PEN_DISABLED_COLOR = 'rgba(90, 90, 90, 0.75)';
+const PEN_X_SIZE = 5;
 
 export function renderScene(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
   scene: Scene,
+  pens: Record<string, Pen>,
+  penTrails: Record<string, PenTrailStroke[]>,
   createStick: CreateStickState,
   createLine: LineCreateState,
-  createCircle: CircleCreateState,
   selection: SelectionState
 ): void {
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = BACKGROUND_COLOR;
   ctx.fillRect(0, 0, width, height);
 
+  for (const strokes of Object.values(penTrails)) {
+    for (const stroke of strokes) {
+      if (stroke.points.length < 2) {
+        continue;
+      }
+      ctx.beginPath();
+      ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
+      for (let i = 1; i < stroke.points.length; i += 1) {
+        ctx.lineTo(stroke.points[i].x, stroke.points[i].y);
+      }
+      ctx.strokeStyle = stroke.color;
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+    }
+  }
+
   for (const stick of Object.values(scene.sticks)) {
+    if (stick.visible === false) {
+      continue;
+    }
     const a = scene.nodes[stick.a]?.pos;
     const b = scene.nodes[stick.b]?.pos;
     if (!a || !b) {
@@ -75,14 +98,6 @@ export function renderScene(
     ctx.stroke();
   }
 
-  for (const circle of Object.values(scene.circles)) {
-    ctx.beginPath();
-    ctx.arc(circle.center.x, circle.center.y, circle.radius, 0, Math.PI * 2);
-    ctx.strokeStyle = CIRCLE_COLOR;
-    ctx.lineWidth = 3;
-    ctx.stroke();
-  }
-
   if (selection.lineId) {
     const line = scene.lines[selection.lineId];
     if (line) {
@@ -98,22 +113,9 @@ export function renderScene(
     }
   }
 
-  if (selection.circleId) {
-    const circle = scene.circles[selection.circleId];
-    if (circle) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(circle.center.x, circle.center.y, circle.radius, 0, Math.PI * 2);
-      ctx.strokeStyle = CIRCLE_AURA_COLOR;
-      ctx.lineWidth = 10;
-      ctx.stroke();
-      ctx.restore();
-    }
-  }
-
   if (selection.stickId) {
     const selectedStick = scene.sticks[selection.stickId];
-    if (selectedStick) {
+    if (selectedStick && selectedStick.visible !== false) {
       const a = scene.nodes[selectedStick.a]?.pos;
       const b = scene.nodes[selectedStick.b]?.pos;
       if (a && b) {
@@ -152,18 +154,6 @@ export function renderScene(
     ctx.moveTo(createLine.start.x, createLine.start.y);
     ctx.lineTo(createLine.previewEnd.x, createLine.previewEnd.y);
     ctx.strokeStyle = LINE_COLOR;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  if (createCircle.center && createCircle.previewEdge) {
-    const radius = distance(createCircle.center, createCircle.previewEdge);
-    ctx.save();
-    ctx.beginPath();
-    ctx.setLineDash([6, 6]);
-    ctx.arc(createCircle.center.x, createCircle.center.y, radius, 0, Math.PI * 2);
-    ctx.strokeStyle = CIRCLE_COLOR;
     ctx.lineWidth = 2;
     ctx.stroke();
     ctx.restore();
@@ -209,5 +199,21 @@ export function renderScene(
       ctx.lineWidth = 3;
       ctx.stroke();
     }
+  }
+
+  for (const pen of Object.values(pens)) {
+    const node = scene.nodes[pen.nodeId];
+    if (!node || node.anchored) {
+      continue;
+    }
+    const color = pen.enabled ? pen.color : PEN_DISABLED_COLOR;
+    ctx.beginPath();
+    ctx.moveTo(node.pos.x - PEN_X_SIZE, node.pos.y - PEN_X_SIZE);
+    ctx.lineTo(node.pos.x + PEN_X_SIZE, node.pos.y + PEN_X_SIZE);
+    ctx.moveTo(node.pos.x - PEN_X_SIZE, node.pos.y + PEN_X_SIZE);
+    ctx.lineTo(node.pos.x + PEN_X_SIZE, node.pos.y - PEN_X_SIZE);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
   }
 }

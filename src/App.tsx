@@ -9,6 +9,12 @@ type AppProps = {
   store?: SceneStore;
 };
 
+type PenContextMenuState = {
+  nodeId: string;
+  x: number;
+  y: number;
+};
+
 function useStoreVersion(store: SceneStore): number {
   const [version, setVersion] = useState(0);
 
@@ -23,17 +29,20 @@ function useStoreVersion(store: SceneStore): number {
 
 export default function App({ store }: AppProps): JSX.Element {
   const localStoreRef = useRef<SceneStore | null>(null);
+  const penMenuRef = useRef<HTMLDivElement | null>(null);
   if (!localStoreRef.current) {
     localStoreRef.current = createSceneStore();
   }
 
   const sceneStore = store ?? localStoreRef.current!;
   const version = useStoreVersion(sceneStore);
+  const [penMenu, setPenMenu] = useState<PenContextMenuState | null>(null);
   const state = sceneStore.getState();
 
   const nodeCount = Object.keys(state.scene.nodes).length;
-  const stickCount = Object.keys(state.scene.sticks).length;
+  const stickCount = Object.values(state.scene.sticks).filter((stick) => stick.visible !== false).length;
   const anchorCount = Object.values(state.scene.nodes).filter((node) => node.anchored).length;
+  const selectedPen = penMenu ? state.pens[penMenu.nodeId] : null;
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -63,12 +72,6 @@ export default function App({ store }: AppProps): JSX.Element {
         return;
       }
 
-      if (state.selection.circleId) {
-        event.preventDefault();
-        sceneStore.deleteSelectedCircle();
-        return;
-      }
-
       if (state.selection.lineId) {
         event.preventDefault();
         sceneStore.deleteSelectedLine();
@@ -85,10 +88,49 @@ export default function App({ store }: AppProps): JSX.Element {
     state.physics.enabled,
     state.selection.anchorNodeId,
     state.selection.pivotNodeId,
-    state.selection.circleId,
     state.selection.lineId,
     state.selection.stickId
   ]);
+
+  useEffect(() => {
+    if (!penMenu) {
+      return;
+    }
+    if (!state.pens[penMenu.nodeId] || !state.scene.nodes[penMenu.nodeId]) {
+      setPenMenu(null);
+    }
+  }, [penMenu, state.pens, state.scene.nodes]);
+
+  useEffect(() => {
+    if (!penMenu) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent): void => {
+      const target = event.target as Node | null;
+      if (!target) {
+        setPenMenu(null);
+        return;
+      }
+      if (penMenuRef.current?.contains(target)) {
+        return;
+      }
+      setPenMenu(null);
+    };
+
+    const handleEscape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setPenMenu(null);
+      }
+    };
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [penMenu]);
 
   useEffect(() => {
     if (!state.physics.enabled) {
@@ -118,6 +160,7 @@ export default function App({ store }: AppProps): JSX.Element {
         tool={state.tool}
         physicsEnabled={state.physics.enabled}
         onToggle={(mode) => {
+          setPenMenu(null);
           if (state.tool === mode) {
             sceneStore.setTool('idle');
           } else {
@@ -125,6 +168,7 @@ export default function App({ store }: AppProps): JSX.Element {
           }
         }}
         onSetPhysicsEnabled={(enabled) => {
+          setPenMenu(null);
           sceneStore.setPhysicsEnabled(enabled);
         }}
       />
@@ -133,14 +177,61 @@ export default function App({ store }: AppProps): JSX.Element {
         <LinkageCanvas
           store={sceneStore}
           scene={state.scene}
+          pens={state.pens}
+          penTrails={state.penTrails}
           createStick={state.createStick}
           createLine={state.createLine}
-          createCircle={state.createCircle}
           selection={state.selection}
           tool={state.tool}
           renderNonce={version}
+          onPenContextMenu={(payload) => {
+            if (!payload) {
+              setPenMenu(null);
+              return;
+            }
+            setPenMenu({
+              nodeId: payload.nodeId,
+              x: payload.clientX,
+              y: payload.clientY
+            });
+          }}
         />
       </div>
+
+      {penMenu && selectedPen ? (
+        <div
+          ref={penMenuRef}
+          data-testid="pen-context-menu"
+          className="pen-context-menu"
+          style={{
+            left: `${Math.max(8, Math.min(penMenu.x, window.innerWidth - 210))}px`,
+            top: `${Math.max(8, Math.min(penMenu.y, window.innerHeight - 130))}px`
+          }}
+        >
+          <label className="pen-context-row" htmlFor="pen-color-input">
+            Color
+            <input
+              id="pen-color-input"
+              data-testid="pen-color-input"
+              type="color"
+              value={selectedPen.color}
+              onChange={(event) => {
+                sceneStore.setPenColor(penMenu.nodeId, event.target.value);
+              }}
+            />
+          </label>
+          <button
+            type="button"
+            data-testid="pen-enable-toggle"
+            onClick={() => {
+              sceneStore.setPenEnabled(penMenu.nodeId, !selectedPen.enabled);
+              setPenMenu(null);
+            }}
+          >
+            {selectedPen.enabled ? 'Disable pen' : 'Enable pen'}
+          </button>
+        </div>
+      ) : null}
 
       <div className="statusbar" data-testid="statusbar">
         <span>
@@ -162,6 +253,9 @@ export default function App({ store }: AppProps): JSX.Element {
 
       <pre data-testid="scene-debug" className="scene-debug">
         {JSON.stringify(state.scene)}
+      </pre>
+      <pre data-testid="pen-debug" className="scene-debug">
+        {JSON.stringify({ pens: state.pens, penTrails: state.penTrails })}
       </pre>
     </div>
   );

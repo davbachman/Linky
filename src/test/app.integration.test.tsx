@@ -18,6 +18,11 @@ type SceneDebug = {
   circles: Record<string, { id: string; center: { x: number; y: number }; radius: number }>;
 };
 
+type PenDebug = {
+  pens: Record<string, { nodeId: string; color: string; enabled: boolean }>;
+  penTrails: Record<string, Array<{ color: string; points: Array<{ x: number; y: number }> }>>;
+};
+
 function distance(a: { x: number; y: number }, b: { x: number; y: number }): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
@@ -25,6 +30,11 @@ function distance(a: { x: number; y: number }, b: { x: number; y: number }): num
 function parseScene(): SceneDebug {
   const value = screen.getByTestId('scene-debug').textContent;
   return JSON.parse(value || '{}') as SceneDebug;
+}
+
+function parsePenDebug(): PenDebug {
+  const value = screen.getByTestId('pen-debug').textContent;
+  return JSON.parse(value || '{}') as PenDebug;
 }
 
 function canvas(): HTMLCanvasElement {
@@ -331,14 +341,14 @@ describe('App integration', () => {
     const stickButton = screen.getByTestId('tool-stick') as HTMLButtonElement;
     const anchorButton = screen.getByTestId('tool-anchor') as HTMLButtonElement;
     const lineButton = screen.getByTestId('tool-line') as HTMLButtonElement;
-    const circleButton = screen.getByTestId('tool-circle') as HTMLButtonElement;
+    const penButton = screen.getByTestId('tool-pen') as HTMLButtonElement;
 
     expect(screen.getByTestId('physics-mode')).toHaveTextContent('stop');
     expect(stopButton).toHaveAttribute('aria-pressed', 'true');
     expect(stickButton.disabled).toBe(false);
     expect(anchorButton.disabled).toBe(false);
     expect(lineButton.disabled).toBe(false);
-    expect(circleButton.disabled).toBe(false);
+    expect(penButton.disabled).toBe(false);
 
     fireEvent.click(playButton);
     expect(screen.getByTestId('physics-mode')).toHaveTextContent('play');
@@ -347,7 +357,7 @@ describe('App integration', () => {
     expect(stickButton.disabled).toBe(true);
     expect(anchorButton.disabled).toBe(true);
     expect(lineButton.disabled).toBe(true);
-    expect(circleButton.disabled).toBe(true);
+    expect(penButton.disabled).toBe(true);
 
     fireEvent.click(stopButton);
     expect(screen.getByTestId('physics-mode')).toHaveTextContent('stop');
@@ -355,7 +365,7 @@ describe('App integration', () => {
     expect(stickButton.disabled).toBe(false);
     expect(anchorButton.disabled).toBe(false);
     expect(lineButton.disabled).toBe(false);
-    expect(circleButton.disabled).toBe(false);
+    expect(penButton.disabled).toBe(false);
   });
 
   it('allows dragging a free pivot to inject motion while physics is enabled', () => {
@@ -500,122 +510,47 @@ describe('App integration', () => {
     expect(after.pos.x).toBeGreaterThan(170);
   });
 
-  it('creates/selects/resizes/deletes circles in circle mode', () => {
+  it('adds pens in pen mode and shows their default purple marker', () => {
     render(<App />);
 
-    fireEvent.click(screen.getByTestId('tool-circle'));
-    drawLine(220, 220, 280, 220, 1);
+    fireEvent.click(screen.getByTestId('tool-stick'));
+    drawStick(120, 140, 250, 140, 1);
 
-    let scene = parseScene();
-    expect(Object.keys(scene.circles)).toHaveLength(1);
-
+    fireEvent.click(screen.getByTestId('tool-pen'));
     const target = canvas();
     const ctx = target.getContext('2d') as unknown as {
       __ops: Array<{ type: string; strokeStyle?: string }>;
     };
     ctx.__ops.length = 0;
 
-    fireEvent.pointerDown(target, { clientX: 280, clientY: 220, pointerId: 2 });
-    expect(
-      ctx.__ops.some((op) => op.type === 'stroke' && op.strokeStyle === 'rgba(43, 108, 230, 0.35)')
-    ).toBe(true);
+    fireEvent.pointerDown(target, { clientX: 250, clientY: 140, pointerId: 2 });
 
-    fireEvent.pointerDown(target, { clientX: 280, clientY: 220, pointerId: 3 });
-    fireEvent.pointerMove(target, { clientX: 310, clientY: 220, pointerId: 3 });
-    fireEvent.pointerUp(target, { clientX: 310, clientY: 220, pointerId: 3 });
-
-    scene = parseScene();
-    const circle = Object.values(scene.circles)[0];
-    expect(circle.radius).toBeGreaterThan(70);
-
-    fireEvent.pointerDown(target, { clientX: 500, clientY: 500, pointerId: 4 });
-    fireEvent.pointerUp(target, { clientX: 500, clientY: 500, pointerId: 4 });
-    pressDelete();
-    scene = parseScene();
-    expect(Object.keys(scene.circles)).toHaveLength(1);
-
-    fireEvent.pointerDown(target, { clientX: 300, clientY: 220, pointerId: 5 });
-    pressDelete();
-    scene = parseScene();
-    expect(Object.keys(scene.circles)).toHaveLength(0);
+    const pens = parsePenDebug().pens;
+    expect(Object.keys(pens)).toHaveLength(1);
+    expect(Object.values(pens)[0].color).toBe('#7b3fe4');
+    expect(ctx.__ops.some((op) => op.type === 'stroke' && op.strokeStyle === '#7b3fe4')).toBe(true);
   });
 
-  it('keeps circle-constrained pivots constrained under mostly tangential dragging', () => {
+  it('opens a pen context menu on right-click and updates color/enabled state', () => {
     render(<App />);
 
     fireEvent.click(screen.getByTestId('tool-stick'));
-    drawStick(260, 220, 360, 220, 1);
-
-    fireEvent.click(screen.getByTestId('tool-circle'));
-    drawLine(220, 220, 300, 220, 2);
-    fireEvent.click(screen.getByTestId('tool-circle'));
-    expect(screen.getByTestId('tool-mode')).toHaveTextContent('idle');
+    drawStick(120, 140, 250, 140, 1);
+    fireEvent.click(screen.getByTestId('tool-pen'));
 
     const target = canvas();
-    const before = parseScene();
-    const moving = Object.values(before.nodes).find((node) => node.pos.x > 300);
-    expect(moving).toBeDefined();
+    fireEvent.pointerDown(target, { clientX: 250, clientY: 140, pointerId: 2 });
 
-    fireEvent.pointerDown(target, { clientX: moving!.pos.x, clientY: moving!.pos.y, pointerId: 3 });
-    fireEvent.pointerMove(target, { clientX: 298, clientY: 222, pointerId: 3 });
-    fireEvent.pointerUp(target, { clientX: 298, clientY: 222, pointerId: 3 });
+    fireEvent.contextMenu(target, { clientX: 250, clientY: 140, button: 2 });
+    expect(screen.getByTestId('pen-context-menu')).toBeInTheDocument();
 
-    const afterFirstDrag = parseScene();
-    const constrained = afterFirstDrag.nodes[moving!.id];
-    expect(constrained.circleConstraintId).toBeDefined();
+    fireEvent.change(screen.getByTestId('pen-color-input'), {
+      target: { value: '#00aa55' }
+    });
+    expect(Object.values(parsePenDebug().pens)[0].color).toBe('#00aa55');
 
-    const circle = Object.values(afterFirstDrag.circles)[0];
-    const firstRadiusError = Math.abs(distance(constrained.pos, circle.center) - circle.radius);
-    expect(firstRadiusError).toBeLessThan(1.5);
-
-    fireEvent.pointerDown(
-      target,
-      { clientX: afterFirstDrag.nodes[moving!.id].pos.x, clientY: afterFirstDrag.nodes[moving!.id].pos.y, pointerId: 4 }
-    );
-    fireEvent.pointerMove(target, { clientX: 302, clientY: 305, pointerId: 4 });
-    fireEvent.pointerUp(target, { clientX: 302, clientY: 305, pointerId: 4 });
-
-    const afterSecondDrag = parseScene();
-    const constrainedAgain = afterSecondDrag.nodes[moving!.id];
-    const circleAfter = Object.values(afterSecondDrag.circles)[0];
-    const secondRadiusError = Math.abs(
-      distance(constrainedAgain.pos, circleAfter.center) - circleAfter.radius
-    );
-    expect(secondRadiusError).toBeLessThan(1.5);
+    fireEvent.click(screen.getByTestId('pen-enable-toggle'));
+    expect(Object.values(parsePenDebug().pens)[0].enabled).toBe(false);
   });
 
-  it('releases circle constraints when dragging mostly normal to the circle', () => {
-    render(<App />);
-
-    fireEvent.click(screen.getByTestId('tool-stick'));
-    drawStick(260, 220, 360, 220, 1);
-
-    fireEvent.click(screen.getByTestId('tool-circle'));
-    drawLine(220, 220, 300, 220, 2);
-    fireEvent.click(screen.getByTestId('tool-circle'));
-
-    const target = canvas();
-    const before = parseScene();
-    const moving = Object.values(before.nodes).find((node) => node.pos.x > 300);
-    expect(moving).toBeDefined();
-
-    fireEvent.pointerDown(target, { clientX: moving!.pos.x, clientY: moving!.pos.y, pointerId: 3 });
-    fireEvent.pointerMove(target, { clientX: 298, clientY: 222, pointerId: 3 });
-    fireEvent.pointerUp(target, { clientX: 298, clientY: 222, pointerId: 3 });
-    expect(parseScene().nodes[moving!.id].circleConstraintId).toBeDefined();
-
-    fireEvent.pointerDown(
-      target,
-      { clientX: parseScene().nodes[moving!.id].pos.x, clientY: parseScene().nodes[moving!.id].pos.y, pointerId: 4 }
-    );
-    fireEvent.pointerMove(target, { clientX: 420, clientY: 220, pointerId: 4 });
-    fireEvent.pointerUp(target, { clientX: 420, clientY: 220, pointerId: 4 });
-
-    const afterScene = parseScene();
-    const after = afterScene.nodes[moving!.id];
-    const circle = Object.values(afterScene.circles)[0];
-    const radiusError = Math.abs(distance(after.pos, circle.center) - circle.radius);
-    expect(after.circleConstraintId).toBeNull();
-    expect(radiusError).toBeGreaterThan(10);
-  });
 });

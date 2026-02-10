@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { PointerEvent as ReactPointerEvent } from 'react';
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 
 import { renderScene } from '../model/render';
 import type {
   CreateStickState,
-  CircleCreateState,
   LineCreateState,
+  Pen,
+  PenTrailStroke,
   Scene,
   SceneStore,
   SelectionState,
@@ -16,41 +17,45 @@ import type {
 type LinkageCanvasProps = {
   store: SceneStore;
   scene: Scene;
+  pens: Record<string, Pen>;
+  penTrails: Record<string, PenTrailStroke[]>;
   createStick: CreateStickState;
   createLine: LineCreateState;
-  createCircle: CircleCreateState;
   selection: SelectionState;
   tool: ToolMode;
   renderNonce: number;
+  onPenContextMenu: (payload: { nodeId: string; clientX: number; clientY: number } | null) => void;
 };
 
-type InteractionMode =
-  | 'stick'
-  | 'drag'
-  | 'resize-stick'
-  | 'line'
-  | 'resize-line'
-  | 'circle'
-  | 'resize-circle'
-  | null;
+type InteractionMode = 'stick' | 'drag' | 'resize-stick' | 'line' | 'resize-line' | null;
 
 function getCanvasPoint(event: ReactPointerEvent<HTMLCanvasElement>, canvas: HTMLCanvasElement): Vec2 {
+  return getCanvasPointFromClient(event.clientX, event.clientY, canvas);
+}
+
+function getCanvasPointFromClient(
+  clientX: number,
+  clientY: number,
+  canvas: HTMLCanvasElement
+): Vec2 {
   const rect = canvas.getBoundingClientRect();
   return {
-    x: event.clientX - rect.left,
-    y: event.clientY - rect.top
+    x: clientX - rect.left,
+    y: clientY - rect.top
   };
 }
 
 export function LinkageCanvas({
   store,
   scene,
+  pens,
+  penTrails,
   createStick,
   createLine,
-  createCircle,
   selection,
   tool,
-  renderNonce
+  renderNonce,
+  onPenContextMenu
 }: LinkageCanvasProps): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const activePointerIdRef = useRef<number | null>(null);
@@ -113,16 +118,18 @@ export function LinkageCanvas({
       viewport.width,
       viewport.height,
       scene,
+      pens,
+      penTrails,
       createStick,
       createLine,
-      createCircle,
       selection
     );
   }, [
     scene,
+    pens,
+    penTrails,
     createStick,
     createLine,
-    createCircle,
     selection,
     viewport.height,
     viewport.width,
@@ -135,10 +142,6 @@ export function LinkageCanvas({
       activePointerIdRef.current = null;
     }
     if (tool !== 'line' && activeInteractionRef.current === 'line') {
-      activeInteractionRef.current = null;
-      activePointerIdRef.current = null;
-    }
-    if (tool !== 'circle' && activeInteractionRef.current === 'circle') {
       activeInteractionRef.current = null;
       activePointerIdRef.current = null;
     }
@@ -174,14 +177,6 @@ export function LinkageCanvas({
         return;
       }
 
-      const beginCircleResize = store.tryBeginSelectedCircleResizeAt(point);
-      if (beginCircleResize.ok) {
-        activePointerIdRef.current = event.pointerId;
-        activeInteractionRef.current = 'resize-circle';
-        canvas.setPointerCapture(event.pointerId);
-        return;
-      }
-
       const selectionHit = store.selectAt(point);
       if (selectionHit) {
         if (tool === 'stick' && (selectionHit.kind === 'pivot' || selectionHit.kind === 'anchor')) {
@@ -196,6 +191,11 @@ export function LinkageCanvas({
 
         if (tool === 'anchor' && selectionHit.kind === 'pivot') {
           store.setAnchor(selectionHit.id);
+          return;
+        }
+
+        if (tool === 'pen' && selectionHit.kind === 'pivot') {
+          store.setPen(selectionHit.id);
           return;
         }
 
@@ -230,16 +230,6 @@ export function LinkageCanvas({
         return;
       }
 
-      if (tool === 'circle') {
-        const beginCircle = store.beginCircle(point);
-        if (beginCircle.ok) {
-          activePointerIdRef.current = event.pointerId;
-          activeInteractionRef.current = 'circle';
-          canvas.setPointerCapture(event.pointerId);
-        }
-        return;
-      }
-
       if (tool === 'idle') {
         const dragStart = store.tryBeginDragAt(point);
         if (dragStart.ok) {
@@ -250,6 +240,28 @@ export function LinkageCanvas({
       }
     },
     [store, tool]
+  );
+
+  const handleContextMenu = useCallback(
+    (event: ReactMouseEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current;
+      if (!canvas) {
+        return;
+      }
+      const point = getCanvasPointFromClient(event.clientX, event.clientY, canvas);
+      const nodeId = store.hitTestPen(point);
+      if (nodeId) {
+        event.preventDefault();
+        onPenContextMenu({
+          nodeId,
+          clientX: event.clientX,
+          clientY: event.clientY
+        });
+        return;
+      }
+      onPenContextMenu(null);
+    },
+    [onPenContextMenu, store]
   );
 
   const handlePointerMove = useCallback(
@@ -272,10 +284,6 @@ export function LinkageCanvas({
         store.updateLinePreview(point);
       } else if (activeInteractionRef.current === 'resize-line') {
         store.updateSelectedLineResize(point);
-      } else if (activeInteractionRef.current === 'circle') {
-        store.updateCirclePreview(point);
-      } else if (activeInteractionRef.current === 'resize-circle') {
-        store.updateSelectedCircleResize(point);
       } else if (activeInteractionRef.current === 'drag') {
         store.updateDrag(point);
       }
@@ -304,10 +312,6 @@ export function LinkageCanvas({
           store.endLine(point);
         } else if (activeInteractionRef.current === 'resize-line') {
           store.endSelectedLineResize();
-        } else if (activeInteractionRef.current === 'circle') {
-          store.endCircle(point);
-        } else if (activeInteractionRef.current === 'resize-circle') {
-          store.endSelectedCircleResize();
         } else if (activeInteractionRef.current === 'drag') {
           store.endDrag();
         }
@@ -336,8 +340,6 @@ export function LinkageCanvas({
           store.endSelectedStickResize();
         } else if (activeInteractionRef.current === 'resize-line') {
           store.endSelectedLineResize();
-        } else if (activeInteractionRef.current === 'resize-circle') {
-          store.endSelectedCircleResize();
         }
 
         canvas.releasePointerCapture(event.pointerId);
@@ -356,6 +358,7 @@ export function LinkageCanvas({
       onPointerMove={handlePointerMove}
       onPointerUp={finishInteraction}
       onPointerCancel={cancelInteraction}
+      onContextMenu={handleContextMenu}
     />
   );
 }

@@ -1,4 +1,4 @@
-export type ToolMode = 'idle' | 'stick' | 'anchor' | 'line' | 'circle';
+export type ToolMode = 'idle' | 'stick' | 'anchor' | 'line' | 'pen' | 'circle';
 
 export type Vec2 = {
   x: number;
@@ -18,6 +18,8 @@ export type Stick = {
   a: string;
   b: string;
   restLength: number;
+  visible?: boolean;
+  attachmentHostStickId?: string | null;
 };
 
 export type LineConstraint = {
@@ -37,6 +39,17 @@ export type Scene = {
   sticks: Record<string, Stick>;
   lines: Record<string, LineConstraint>;
   circles: Record<string, CircleConstraint>;
+};
+
+export type Pen = {
+  nodeId: string;
+  color: string;
+  enabled: boolean;
+};
+
+export type PenTrailStroke = {
+  color: string;
+  points: Vec2[];
 };
 
 export type DragState = {
@@ -110,6 +123,8 @@ export type Result = {
 
 export type SceneStoreState = {
   scene: Scene;
+  pens: Record<string, Pen>;
+  penTrails: Record<string, PenTrailStroke[]>;
   tool: ToolMode;
   drag: DragState;
   createStick: CreateStickState;
@@ -151,6 +166,11 @@ export interface SceneStore {
   updateSelectedLineResize(pointer: Vec2): Result;
   endSelectedLineResize(): Result;
   deleteSelectedLine(): Result;
+  setPen(nodeId: string): Result;
+  tryHandlePenToolClick(point: Vec2): Result;
+  hitTestPen(point: Vec2): string | null;
+  setPenColor(nodeId: string, color: string): Result;
+  setPenEnabled(nodeId: string, enabled: boolean): Result;
   beginCircle(center: Vec2): Result;
   updateCirclePreview(pointer: Vec2): Result;
   endCircle(edgePoint: Vec2): Result;

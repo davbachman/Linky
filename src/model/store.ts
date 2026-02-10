@@ -7,7 +7,6 @@ import {
   DEFAULT_SNAP_RADIUS,
   DEFAULT_STICK_HIT_RADIUS,
   distance,
-  distancePointToCircle,
   hitTestLine,
   hitTestCircle,
   hitTestCircleCenter,
@@ -15,7 +14,6 @@ import {
   hitTestLineEndpoint,
   hitTestPivot,
   hitTestStick,
-  projectPointToCircle,
   projectPointToInfiniteLine
 } from './hitTest';
 import {
@@ -39,6 +37,8 @@ export const CIRCLE_HIT_RADIUS = DEFAULT_CIRCLE_HIT_RADIUS;
 export const CIRCLE_HANDLE_HIT_RADIUS = DEFAULT_CIRCLE_HANDLE_HIT_RADIUS;
 export const CIRCLE_SNAP_RADIUS = 12;
 export const MIN_CIRCLE_RADIUS = 6;
+export const DEFAULT_PEN_COLOR = '#7b3fe4';
+export const PEN_HIT_RADIUS = DEFAULT_PIVOT_HIT_RADIUS;
 const CONSTRAINED_SOLVER_MIN_ITERATIONS = 500;
 const CONSTRAINED_SOLVER_TOLERANCE_PX = 0.005;
 const PHYSICS_CONSTRAINT_ITERATIONS = 30;
@@ -53,6 +53,10 @@ export type SnapResult = {
   nodeId: string;
   created: boolean;
 };
+
+function isHexColor(value: string): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(value);
+}
 
 export function createEmptyScene(): Scene {
   return {
@@ -238,6 +242,68 @@ function hitTestSelectedCircleHandle(
   return null;
 }
 
+function projectPointToSegment(point: Vec2, a: Vec2, b: Vec2): { projected: Vec2; t: number } {
+  const vx = b.x - a.x;
+  const vy = b.y - a.y;
+  const lenSq = vx * vx + vy * vy;
+  if (lenSq <= 1e-9) {
+    return { projected: { x: a.x, y: a.y }, t: 0 };
+  }
+  const wx = point.x - a.x;
+  const wy = point.y - a.y;
+  const rawT = (wx * vx + wy * vy) / lenSq;
+  const t = Math.min(1, Math.max(0, rawT));
+  return {
+    projected: {
+      x: a.x + t * vx,
+      y: a.y + t * vy
+    },
+    t
+  };
+}
+
+function findInteriorStickHit(
+  scene: Scene,
+  point: Vec2,
+  radius: number,
+  excludedStickIds: Set<string> = new Set<string>()
+): { stickId: string; projected: Vec2 } | null {
+  let best: { stickId: string; projected: Vec2 } | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (const stick of Object.values(scene.sticks)) {
+    if (stick.visible === false) {
+      continue;
+    }
+    if (excludedStickIds.has(stick.id)) {
+      continue;
+    }
+    const a = scene.nodes[stick.a]?.pos;
+    const b = scene.nodes[stick.b]?.pos;
+    if (!a || !b) {
+      continue;
+    }
+
+    const { projected } = projectPointToSegment(point, a, b);
+    const distToA = distance(projected, a);
+    const distToB = distance(projected, b);
+    if (distToA <= STICK_ENDPOINT_HIT_RADIUS || distToB <= STICK_ENDPOINT_HIT_RADIUS) {
+      continue;
+    }
+
+    const d = distance(point, projected);
+    if (d > radius) {
+      continue;
+    }
+    if (d < bestDistance) {
+      bestDistance = d;
+      best = { stickId: stick.id, projected };
+    }
+  }
+
+  return best;
+}
+
 function setAnchorSelection(state: SceneStoreState, nodeId: string): void {
   clearAllSelections(state);
   state.selection.anchorNodeId = nodeId;
@@ -302,30 +368,24 @@ function shouldReleaseFromLine(line: { a: Vec2; b: Vec2 }, previousRaw: Vec2, ra
   );
 }
 
-function shouldReleaseFromCircle(
-  circle: { center: Vec2; radius: number },
-  nodePos: Vec2,
-  previousRaw: Vec2,
-  raw: Vec2
-): boolean {
-  const radial =
-    normalize({ x: nodePos.x - circle.center.x, y: nodePos.y - circle.center.y }) ??
-    normalize({ x: raw.x - circle.center.x, y: raw.y - circle.center.y });
-  if (!radial) {
-    return false;
+function getAttachmentHingeNodeId(scene: Scene, attachmentStickId: string): string | null {
+  const attachment = scene.sticks[attachmentStickId];
+  if (!attachment || attachment.visible !== false || !attachment.attachmentHostStickId) {
+    return null;
   }
 
-  const tangent = { x: -radial.y, y: radial.x };
-  const rawDelta = { x: raw.x - previousRaw.x, y: raw.y - previousRaw.y };
-  const radiusError = Math.abs(distance(raw, circle.center) - circle.radius);
-  const normalStep = Math.abs(dot(rawDelta, radial));
-  const tangentStep = Math.abs(dot(rawDelta, tangent));
+  const host = scene.sticks[attachment.attachmentHostStickId];
+  if (!host) {
+    return null;
+  }
 
-  return (
-    radiusError >= CONSTRAINT_RELEASE_DISTANCE &&
-    normalStep >= CONSTRAINT_RELEASE_MIN_STEP &&
-    normalStep >= tangentStep * CONSTRAINT_RELEASE_DIRECTION_RATIO
-  );
+  if (attachment.a === host.a || attachment.a === host.b) {
+    return attachment.b;
+  }
+  if (attachment.b === host.a || attachment.b === host.b) {
+    return attachment.a;
+  }
+  return null;
 }
 
 function enforceComponentConstraints(
@@ -391,34 +451,60 @@ function enforceComponentConstraints(
         continue;
       }
       if (!node.lineConstraintId) {
-        if (!node.circleConstraintId) {
-          continue;
-        }
+        node.circleConstraintId = null;
+        continue;
       }
 
-      if (node.lineConstraintId) {
-        const line = scene.lines[node.lineConstraintId];
-        if (!line) {
-          node.lineConstraintId = null;
-        } else {
-          const projected = projectPointToInfiniteLine(node.pos, line.a, line.b);
-          node.pos.x = projected.x;
-          node.pos.y = projected.y;
-          node.circleConstraintId = null;
-          continue;
-        }
+      const line = scene.lines[node.lineConstraintId];
+      if (!line) {
+        node.lineConstraintId = null;
+        node.circleConstraintId = null;
+        continue;
       }
 
-      if (node.circleConstraintId) {
-        const circle = scene.circles[node.circleConstraintId];
-        if (!circle) {
-          node.circleConstraintId = null;
-          continue;
-        }
-        const projected = projectPointToCircle(node.pos, circle.center, circle.radius);
-        node.pos.x = projected.x;
-        node.pos.y = projected.y;
+      const projected = projectPointToInfiniteLine(node.pos, line.a, line.b);
+      node.pos.x = projected.x;
+      node.pos.y = projected.y;
+      node.circleConstraintId = null;
+    }
+
+    // Keep interior attachments centered on the host stick centerline.
+    const projectedPairs = new Set<string>();
+    for (const stickId of stickIds) {
+      const attachment = scene.sticks[stickId];
+      if (!attachment || attachment.visible !== false || !attachment.attachmentHostStickId) {
+        continue;
       }
+
+      const host = scene.sticks[attachment.attachmentHostStickId];
+      if (!host) {
+        continue;
+      }
+
+      const hingeNodeId = getAttachmentHingeNodeId(scene, stickId);
+      if (!hingeNodeId) {
+        continue;
+      }
+      if (fixedNodeIds.has(hingeNodeId)) {
+        continue;
+      }
+
+      const key = `${host.id}:${hingeNodeId}`;
+      if (projectedPairs.has(key)) {
+        continue;
+      }
+      projectedPairs.add(key);
+
+      const hostA = scene.nodes[host.a]?.pos;
+      const hostB = scene.nodes[host.b]?.pos;
+      const hinge = scene.nodes[hingeNodeId];
+      if (!hostA || !hostB || !hinge) {
+        continue;
+      }
+
+      const { projected } = projectPointToSegment(hinge.pos, hostA, hostB);
+      hinge.pos.x = projected.x;
+      hinge.pos.y = projected.y;
     }
   }
 }
@@ -429,6 +515,7 @@ export function createSceneStore(): SceneStore {
   let lineCounter = 0;
   let circleCounter = 0;
   let draftCreatedStartNodeId: string | null = null;
+  let draftStartInteriorTarget = false;
   let lastDragUpdateMs: number | null = null;
   const velocities: Record<string, Vec2> = {};
 
@@ -436,6 +523,8 @@ export function createSceneStore(): SceneStore {
 
   const state: SceneStoreState = {
     scene: createEmptyScene(),
+    pens: {},
+    penTrails: {},
     tool: 'idle',
     drag: {
       activeNodeId: null,
@@ -517,6 +606,7 @@ export function createSceneStore(): SceneStore {
       removeNodeIfIsolated(state.scene, draftCreatedStartNodeId);
       draftCreatedStartNodeId = null;
     }
+    draftStartInteriorTarget = false;
     clearCreateStickState(state);
   };
 
@@ -528,10 +618,188 @@ export function createSceneStore(): SceneStore {
     clearCircleCreateState(state);
   };
 
+  const createNodeAt = (point: Vec2): string => {
+    const nodeId = nextNodeId();
+    state.scene.nodes[nodeId] = {
+      id: nodeId,
+      pos: { x: point.x, y: point.y },
+      anchored: false,
+      lineConstraintId: null,
+      circleConstraintId: null
+    };
+    ensureVelocityNode(nodeId);
+    return nodeId;
+  };
+
+  const bindNodeToNearbyLine = (nodeId: string): void => {
+    const node = state.scene.nodes[nodeId];
+    if (!node) {
+      return;
+    }
+    const lineId = hitTestLine(state.scene, node.pos, LINE_SNAP_RADIUS);
+    if (!lineId) {
+      return;
+    }
+    const line = state.scene.lines[lineId];
+    if (!line) {
+      return;
+    }
+    const projected = projectPointToInfiniteLine(node.pos, line.a, line.b);
+    node.pos.x = projected.x;
+    node.pos.y = projected.y;
+    node.lineConstraintId = lineId;
+    node.circleConstraintId = null;
+  };
+
+  const findExistingAttachmentStickBetween = (
+    aId: string,
+    bId: string,
+    hostStickId: string
+  ): string | null => {
+    for (const stick of Object.values(state.scene.sticks)) {
+      if (stick.visible !== false) {
+        continue;
+      }
+      if (stick.attachmentHostStickId !== hostStickId) {
+        continue;
+      }
+      if (
+        (stick.a === aId && stick.b === bId) ||
+        (stick.a === bId && stick.b === aId)
+      ) {
+        return stick.id;
+      }
+    }
+    return null;
+  };
+
+  const upsertAttachmentStickBetween = (
+    aId: string,
+    bId: string,
+    restLength: number,
+    hostStickId: string
+  ): boolean => {
+    if (restLength < MIN_STICK_LENGTH) {
+      return false;
+    }
+    const existingId = findExistingAttachmentStickBetween(aId, bId, hostStickId);
+    if (existingId) {
+      state.scene.sticks[existingId].restLength = restLength;
+      return true;
+    }
+
+    const stickId = nextStickId();
+    state.scene.sticks[stickId] = {
+      id: stickId,
+      a: aId,
+      b: bId,
+      restLength,
+      visible: false,
+      attachmentHostStickId: hostStickId
+    };
+    ensureVelocityNode(aId);
+    ensureVelocityNode(bId);
+    return true;
+  };
+
+  const attachNodeRigidToStick = (stickId: string, hingeNodeId: string): boolean => {
+    const target = state.scene.sticks[stickId];
+    const hinge = state.scene.nodes[hingeNodeId];
+    if (!target || !hinge) {
+      return false;
+    }
+    if (target.a === hingeNodeId || target.b === hingeNodeId) {
+      return false;
+    }
+
+    const a = state.scene.nodes[target.a];
+    const b = state.scene.nodes[target.b];
+    if (!a || !b) {
+      return false;
+    }
+
+    const lenA = distance(a.pos, hinge.pos);
+    const lenB = distance(hinge.pos, b.pos);
+    if (lenA < MIN_STICK_LENGTH || lenB < MIN_STICK_LENGTH) {
+      return false;
+    }
+
+    const aLinked = upsertAttachmentStickBetween(target.a, hingeNodeId, lenA, stickId);
+    const bLinked = upsertAttachmentStickBetween(hingeNodeId, target.b, lenB, stickId);
+    return aLinked && bLinked;
+  };
+
   const ensureVelocityNode = (nodeId: string): void => {
     if (!velocities[nodeId]) {
       velocities[nodeId] = { x: 0, y: 0 };
     }
+  };
+
+  const removePenForNode = (nodeId: string): void => {
+    if (state.selection.pivotNodeId === nodeId && state.scene.nodes[nodeId]?.anchored) {
+      clearPivotSelection(state);
+    }
+    delete state.pens[nodeId];
+    delete state.penTrails[nodeId];
+  };
+
+  const prunePens = (): void => {
+    for (const nodeId of Object.keys(state.pens)) {
+      const node = state.scene.nodes[nodeId];
+      if (!node || node.anchored) {
+        removePenForNode(nodeId);
+      }
+    }
+    for (const nodeId of Object.keys(state.penTrails)) {
+      if (!state.scene.nodes[nodeId] || !state.pens[nodeId]) {
+        delete state.penTrails[nodeId];
+      }
+    }
+  };
+
+  const clearPenTrails = (): void => {
+    state.penTrails = {};
+  };
+
+  const appendPenTrailPoint = (nodeId: string, point: Vec2, color: string): void => {
+    const normalizedColor = isHexColor(color) ? color.toLowerCase() : DEFAULT_PEN_COLOR;
+    let strokes = state.penTrails[nodeId];
+    if (!strokes) {
+      strokes = [];
+      state.penTrails[nodeId] = strokes;
+    }
+
+    let stroke = strokes[strokes.length - 1];
+    if (!stroke || stroke.color.toLowerCase() !== normalizedColor) {
+      stroke = { color: normalizedColor, points: [] };
+      strokes.push(stroke);
+    }
+
+    const lastPoint = stroke.points[stroke.points.length - 1];
+    if (!lastPoint || distance(lastPoint, point) > 0.25) {
+      stroke.points.push({ x: point.x, y: point.y });
+    }
+  };
+
+  const recordPenTrails = (): void => {
+    if (!state.physics.enabled) {
+      return;
+    }
+    for (const pen of Object.values(state.pens)) {
+      if (!pen.enabled) {
+        continue;
+      }
+      const node = state.scene.nodes[pen.nodeId];
+      if (!node || node.anchored) {
+        continue;
+      }
+      appendPenTrailPoint(pen.nodeId, node.pos, pen.color);
+    }
+  };
+
+  const beginPenTrailSession = (): void => {
+    clearPenTrails();
+    recordPenTrails();
   };
 
   const pruneVelocities = (): void => {
@@ -540,6 +808,7 @@ export function createSceneStore(): SceneStore {
         delete velocities[nodeId];
       }
     }
+    prunePens();
   };
 
   const resetAllVelocities = (): void => {
@@ -575,6 +844,7 @@ export function createSceneStore(): SceneStore {
       return { ok: false, reason: 'Node does not exist.' };
     }
     if (node.anchored) {
+      removePenForNode(nodeId);
       setAnchorSelection(state, nodeId);
       clearStickResize(state);
       clearLineResize(state);
@@ -583,6 +853,7 @@ export function createSceneStore(): SceneStore {
       return { ok: true };
     }
     node.anchored = true;
+    removePenForNode(nodeId);
     setAnchorSelection(state, nodeId);
     emit();
     return { ok: true };
@@ -605,6 +876,55 @@ export function createSceneStore(): SceneStore {
     return { ok: true };
   };
 
+  const hitTestPenAtPoint = (point: Vec2, radius = PEN_HIT_RADIUS): string | null => {
+    const limitSq = radius * radius;
+    let bestNodeId: string | null = null;
+    let bestDistanceSq = Number.POSITIVE_INFINITY;
+
+    for (const pen of Object.values(state.pens)) {
+      const node = state.scene.nodes[pen.nodeId];
+      if (!node || node.anchored) {
+        continue;
+      }
+      const dx = node.pos.x - point.x;
+      const dy = node.pos.y - point.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > limitSq) {
+        continue;
+      }
+      if (d2 < bestDistanceSq) {
+        bestDistanceSq = d2;
+        bestNodeId = node.id;
+      }
+    }
+
+    return bestNodeId;
+  };
+
+  const applySetPenByNodeId = (nodeId: string): Result => {
+    if (isEditLocked()) {
+      return { ok: false, reason: 'Pen editing is disabled while physics is enabled.' };
+    }
+    const node = state.scene.nodes[nodeId];
+    if (!node) {
+      return { ok: false, reason: 'Node does not exist.' };
+    }
+    if (node.anchored) {
+      return { ok: false, reason: 'Cannot assign a pen to an anchor.' };
+    }
+
+    const existing = state.pens[nodeId];
+    const color = existing && isHexColor(existing.color) ? existing.color.toLowerCase() : DEFAULT_PEN_COLOR;
+    state.pens[nodeId] = {
+      nodeId,
+      color,
+      enabled: existing?.enabled ?? true
+    };
+    setPivotSelection(state, nodeId);
+    emit();
+    return { ok: true };
+  };
+
   const deleteStickById = (stickId: string): Result => {
     if (isEditLocked()) {
       return { ok: false, reason: 'Stick editing is disabled while physics is enabled.' };
@@ -614,9 +934,22 @@ export function createSceneStore(): SceneStore {
       return { ok: false, reason: 'Stick does not exist.' };
     }
 
+    const dependentAttachments = Object.values(state.scene.sticks)
+      .filter(
+        (candidate) => candidate.visible === false && candidate.attachmentHostStickId === stickId
+      );
+
     delete state.scene.sticks[stickId];
+    for (const attachment of dependentAttachments) {
+      delete state.scene.sticks[attachment.id];
+    }
+
     removeNodeIfIsolated(state.scene, stick.a);
     removeNodeIfIsolated(state.scene, stick.b);
+    for (const attachment of dependentAttachments) {
+      removeNodeIfIsolated(state.scene, attachment.a);
+      removeNodeIfIsolated(state.scene, attachment.b);
+    }
 
     if (state.selection.stickId === stickId) {
       clearStickSelection(state);
@@ -797,7 +1130,9 @@ export function createSceneStore(): SceneStore {
         id: stickId,
         a: startSnap.nodeId,
         b: endSnap.nodeId,
-        restLength: len
+        restLength: len,
+        visible: true,
+        attachmentHostStickId: null
       };
 
       ensureVelocityNode(startSnap.nodeId);
@@ -835,69 +1170,20 @@ export function createSceneStore(): SceneStore {
             activeNode.lineConstraintId = null;
           } else {
             constrainedPointer = projectPointToInfiniteLine(constrainedPointer, line.a, line.b);
-            activeNode.circleConstraintId = null;
           }
         } else {
           activeNode.lineConstraintId = null;
         }
       }
 
-      if (!activeNode.lineConstraintId && activeNode.circleConstraintId) {
-        const circle = state.scene.circles[activeNode.circleConstraintId];
-        if (circle) {
-          if (shouldReleaseFromCircle(circle, activeNode.pos, previousRawPointer, rawPointer)) {
-            activeNode.circleConstraintId = null;
-          } else {
-            constrainedPointer = projectPointToCircle(constrainedPointer, circle.center, circle.radius);
-          }
-        } else {
-          activeNode.circleConstraintId = null;
-        }
-      }
-
-      if (!activeNode.lineConstraintId && !activeNode.circleConstraintId) {
+      activeNode.circleConstraintId = null;
+      if (!activeNode.lineConstraintId) {
         const snapLineId = hitTestLine(state.scene, constrainedPointer, LINE_SNAP_RADIUS);
-        const snapCircleId = hitTestCircle(state.scene, constrainedPointer, CIRCLE_SNAP_RADIUS);
-
-        let bestKind: 'line' | 'circle' | null = null;
-        let bestDistance = Number.POSITIVE_INFINITY;
-
         if (snapLineId) {
           const line = state.scene.lines[snapLineId];
           if (line) {
-            const projected = projectPointToInfiniteLine(constrainedPointer, line.a, line.b);
-            const d = distance(projected, constrainedPointer);
-            if (d < bestDistance) {
-              bestDistance = d;
-              bestKind = 'line';
-            }
-          }
-        }
-
-        if (snapCircleId) {
-          const circle = state.scene.circles[snapCircleId];
-          if (circle) {
-            const d = distancePointToCircle(constrainedPointer, circle.center, circle.radius);
-            if (d < bestDistance) {
-              bestDistance = d;
-              bestKind = 'circle';
-            }
-          }
-        }
-
-        if (bestKind === 'line' && snapLineId) {
-          const line = state.scene.lines[snapLineId];
-          if (line) {
             activeNode.lineConstraintId = snapLineId;
-            activeNode.circleConstraintId = null;
             constrainedPointer = projectPointToInfiniteLine(constrainedPointer, line.a, line.b);
-          }
-        } else if (bestKind === 'circle' && snapCircleId) {
-          const circle = state.scene.circles[snapCircleId];
-          if (circle) {
-            activeNode.circleConstraintId = snapCircleId;
-            activeNode.lineConstraintId = null;
-            constrainedPointer = projectPointToCircle(constrainedPointer, circle.center, circle.radius);
           }
         }
       }
@@ -923,6 +1209,14 @@ export function createSceneStore(): SceneStore {
       const hasOtherAnchors = component.nodeIds.some(
         (nodeId) => nodeId !== activeNodeId && state.scene.nodes[nodeId].anchored
       );
+      const activeIncidentStickCount = component.stickIds.reduce((count, stickId) => {
+        const stick = state.scene.sticks[stickId];
+        if (!stick) {
+          return count;
+        }
+        return stick.a === activeNodeId || stick.b === activeNodeId ? count + 1 : count;
+      }, 0);
+      const useSoftProjection = hasOtherAnchors && activeIncidentStickCount > 1;
 
       const solverOptions = hasOtherAnchors
         ? {
@@ -932,9 +1226,9 @@ export function createSceneStore(): SceneStore {
         : state.solverOptions;
 
       let target = constrainedPointer;
-      let mode: 'fixed' | 'soft' = 'fixed';
+      let mode: 'fixed' | 'soft' = hasOtherAnchors ? 'soft' : 'fixed';
 
-      if (hasOtherAnchors) {
+      if (useSoftProjection) {
         const fixedNodeIds = new Set<string>();
         for (const nodeId of component.nodeIds) {
           if (nodeId !== activeNodeId && state.scene.nodes[nodeId].anchored) {
@@ -1016,6 +1310,7 @@ export function createSceneStore(): SceneStore {
         }
       }
 
+      recordPenTrails();
       emit();
       return { ok: true };
     },
@@ -1036,11 +1331,34 @@ export function createSceneStore(): SceneStore {
       if (isEditLocked()) {
         return { ok: false, reason: 'Stick editing is disabled while physics is enabled.' };
       }
-      const startSnap = snapOrCreateNode(state.scene, start, SNAP_RADIUS, nextNodeId);
-      state.createStick.startNodeId = startSnap.nodeId;
+      const snappedStartNodeId = hitTestPivot(state.scene.nodes, start, SNAP_RADIUS);
+      let startNodeId: string;
+      let created = false;
+
+      if (snappedStartNodeId) {
+        startNodeId = snappedStartNodeId;
+        draftStartInteriorTarget = false;
+      } else {
+        const interiorHit = findInteriorStickHit(state.scene, start, SNAP_RADIUS);
+        if (interiorHit) {
+          startNodeId = createNodeAt(interiorHit.projected);
+          created = true;
+          draftStartInteriorTarget = true;
+        } else {
+          startNodeId = createNodeAt(start);
+          created = true;
+          draftStartInteriorTarget = false;
+        }
+      }
+
+      if (!draftStartInteriorTarget) {
+        bindNodeToNearbyLine(startNodeId);
+      }
+
+      state.createStick.startNodeId = startNodeId;
       state.createStick.previewEnd = { x: start.x, y: start.y };
-      draftCreatedStartNodeId = startSnap.created ? startSnap.nodeId : null;
-      ensureVelocityNode(startSnap.nodeId);
+      draftCreatedStartNodeId = created ? startNodeId : null;
+      ensureVelocityNode(startNodeId);
       emit();
       return { ok: true };
     },
@@ -1066,20 +1384,43 @@ export function createSceneStore(): SceneStore {
         return { ok: false, reason: 'No active stick creation.' };
       }
 
-      const endSnap = snapOrCreateNode(state.scene, end, SNAP_RADIUS, nextNodeId);
+      const snappedEndNodeId = hitTestPivot(state.scene.nodes, end, SNAP_RADIUS);
+      let endNodeId: string;
+      let endCreated = false;
+      let endPendingInteriorSplit = false;
+
+      if (snappedEndNodeId) {
+        endNodeId = snappedEndNodeId;
+      } else {
+        const interiorHit = findInteriorStickHit(state.scene, end, SNAP_RADIUS);
+        if (interiorHit) {
+          endNodeId = createNodeAt(interiorHit.projected);
+          endCreated = true;
+          endPendingInteriorSplit = true;
+        } else {
+          endNodeId = createNodeAt(end);
+          endCreated = true;
+        }
+      }
+
+      if (!endPendingInteriorSplit) {
+        bindNodeToNearbyLine(endNodeId);
+      }
+
       const startNode = state.scene.nodes[startNodeId];
-      const endNode = state.scene.nodes[endSnap.nodeId];
+      const endNode = state.scene.nodes[endNodeId];
 
       const len = distance(startNode.pos, endNode.pos);
 
-      if (startNodeId === endSnap.nodeId || len < MIN_STICK_LENGTH) {
-        if (endSnap.created) {
-          removeNodeIfIsolated(state.scene, endSnap.nodeId);
+      if (startNodeId === endNodeId || len < MIN_STICK_LENGTH) {
+        if (endCreated) {
+          removeNodeIfIsolated(state.scene, endNodeId);
         }
         if (draftCreatedStartNodeId) {
           removeNodeIfIsolated(state.scene, draftCreatedStartNodeId);
           draftCreatedStartNodeId = null;
         }
+        draftStartInteriorTarget = false;
         clearCreateStickState(state);
         emit();
         return { ok: false, reason: 'Stick length too small or duplicate endpoints.' };
@@ -1089,13 +1430,51 @@ export function createSceneStore(): SceneStore {
       state.scene.sticks[stickId] = {
         id: stickId,
         a: startNodeId,
-        b: endSnap.nodeId,
-        restLength: len
+        b: endNodeId,
+        restLength: len,
+        visible: true,
+        attachmentHostStickId: null
       };
 
       ensureVelocityNode(startNodeId);
-      ensureVelocityNode(endSnap.nodeId);
+      ensureVelocityNode(endNodeId);
+
+      if (draftStartInteriorTarget) {
+        const startNodePos = state.scene.nodes[startNodeId].pos;
+        const startTarget = findInteriorStickHit(
+          state.scene,
+          startNodePos,
+          STICK_HIT_RADIUS,
+          new Set<string>([stickId])
+        );
+        if (startTarget) {
+          state.scene.nodes[startNodeId].pos = {
+            x: startTarget.projected.x,
+            y: startTarget.projected.y
+          };
+          attachNodeRigidToStick(startTarget.stickId, startNodeId);
+        }
+      }
+
+      if (endPendingInteriorSplit) {
+        const endNodePos = state.scene.nodes[endNodeId].pos;
+        const endTarget = findInteriorStickHit(
+          state.scene,
+          endNodePos,
+          STICK_HIT_RADIUS,
+          new Set<string>([stickId])
+        );
+        if (endTarget) {
+          state.scene.nodes[endNodeId].pos = {
+            x: endTarget.projected.x,
+            y: endTarget.projected.y
+          };
+          attachNodeRigidToStick(endTarget.stickId, endNodeId);
+        }
+      }
+
       draftCreatedStartNodeId = null;
+      draftStartInteriorTarget = false;
       clearCreateStickState(state);
       emit();
       return { ok: true };
@@ -1131,6 +1510,25 @@ export function createSceneStore(): SceneStore {
         clearAllSelections(state);
         clearLineResize(state);
         clearLineCreateState(state);
+        if (hadSelection) {
+          emit();
+        }
+        return;
+      }
+      if (state.tool === 'pen') {
+        const hadSelection =
+          state.selection.anchorNodeId ||
+          state.selection.pivotNodeId ||
+          state.selection.stickId ||
+          state.selection.lineId ||
+          state.selection.circleId ||
+          state.stickResize.active ||
+          state.lineResize.active ||
+          state.circleResize.active;
+        clearAllSelections(state);
+        clearStickResize(state);
+        clearLineResize(state);
+        clearCircleResize(state);
         if (hadSelection) {
           emit();
         }
@@ -1186,17 +1584,6 @@ export function createSceneStore(): SceneStore {
         clearCircleResize(state);
         emit();
         return { kind: 'stick', id: hitStickId } as const;
-      }
-
-      const hitCircleId = hitTestCircle(state.scene, point, CIRCLE_HIT_RADIUS);
-      if (hitCircleId) {
-        setCircleSelection(state, hitCircleId);
-        clearStickResize(state);
-        clearLineResize(state);
-        clearCircleResize(state);
-        clearCircleCreateState(state);
-        emit();
-        return { kind: 'circle', id: hitCircleId } as const;
       }
 
       const hitLineId = hitTestLine(state.scene, point, LINE_HIT_RADIUS);
@@ -1337,21 +1724,11 @@ export function createSceneStore(): SceneStore {
           const projected = projectPointToInfiniteLine(movingNode.pos, line.a, line.b);
           movingNode.pos.x = projected.x;
           movingNode.pos.y = projected.y;
-          movingNode.circleConstraintId = null;
         } else {
           movingNode.lineConstraintId = null;
         }
       }
-      if (!movingNode.lineConstraintId && movingNode.circleConstraintId) {
-        const circle = state.scene.circles[movingNode.circleConstraintId];
-        if (circle) {
-          const projected = projectPointToCircle(movingNode.pos, circle.center, circle.radius);
-          movingNode.pos.x = projected.x;
-          movingNode.pos.y = projected.y;
-        } else {
-          movingNode.circleConstraintId = null;
-        }
-      }
+      movingNode.circleConstraintId = null;
       stick.restLength = distance(fixedNode.pos, movingNode.pos);
       ensureVelocityNode(movingNode.id);
       velocities[movingNode.id].x = 0;
@@ -1366,6 +1743,28 @@ export function createSceneStore(): SceneStore {
       }
       if (!state.stickResize.active) {
         return { ok: false, reason: 'No active stick resize.' };
+      }
+
+      const stickId = state.stickResize.stickId;
+      const movingNodeId = state.stickResize.movingNodeId;
+      const fixedNodeId = state.stickResize.fixedNodeId;
+      if (stickId && movingNodeId && fixedNodeId) {
+        const movingNode = state.scene.nodes[movingNodeId];
+        const fixedNode = state.scene.nodes[fixedNodeId];
+        const stick = state.scene.sticks[stickId];
+        if (movingNode && fixedNode && stick) {
+          const target = findInteriorStickHit(
+            state.scene,
+            movingNode.pos,
+            STICK_HIT_RADIUS,
+            new Set<string>([stickId])
+          );
+          if (target) {
+            movingNode.pos = { x: target.projected.x, y: target.projected.y };
+            attachNodeRigidToStick(target.stickId, movingNodeId);
+            stick.restLength = distance(fixedNode.pos, movingNode.pos);
+          }
+        }
       }
 
       clearStickResize(state);
@@ -1505,6 +1904,76 @@ export function createSceneStore(): SceneStore {
         return { ok: false, reason: 'No selected line.' };
       }
       return deleteLineById(lineId);
+    },
+
+    setPen(nodeId): Result {
+      return applySetPenByNodeId(nodeId);
+    },
+
+    tryHandlePenToolClick(point): Result {
+      if (isEditLocked()) {
+        return { ok: false, reason: 'Pen editing is disabled while physics is enabled.' };
+      }
+      const nodeId = hitTestPivot(state.scene.nodes, point, PIVOT_HIT_RADIUS);
+      if (!nodeId) {
+        const hadSelection =
+          state.selection.anchorNodeId ||
+          state.selection.pivotNodeId ||
+          state.selection.stickId ||
+          state.selection.lineId ||
+          state.selection.circleId;
+        if (hadSelection) {
+          clearAllSelections(state);
+          emit();
+        }
+        return { ok: false, reason: 'No pivot near click.' };
+      }
+
+      const node = state.scene.nodes[nodeId];
+      if (!node || node.anchored) {
+        return { ok: false, reason: 'Pens can only be assigned to non-anchor pivots.' };
+      }
+
+      return applySetPenByNodeId(nodeId);
+    },
+
+    hitTestPen(point): string | null {
+      return hitTestPenAtPoint(point, PEN_HIT_RADIUS);
+    },
+
+    setPenColor(nodeId, color): Result {
+      const pen = state.pens[nodeId];
+      if (!pen) {
+        return { ok: false, reason: 'Pen does not exist.' };
+      }
+      if (!isHexColor(color)) {
+        return { ok: false, reason: 'Color must be a hex value.' };
+      }
+      pen.color = color.toLowerCase();
+      if (state.physics.enabled && pen.enabled) {
+        const node = state.scene.nodes[nodeId];
+        if (node && !node.anchored) {
+          appendPenTrailPoint(nodeId, node.pos, pen.color);
+        }
+      }
+      emit();
+      return { ok: true };
+    },
+
+    setPenEnabled(nodeId, enabled): Result {
+      const pen = state.pens[nodeId];
+      if (!pen) {
+        return { ok: false, reason: 'Pen does not exist.' };
+      }
+      pen.enabled = enabled;
+      if (state.physics.enabled && pen.enabled) {
+        const node = state.scene.nodes[nodeId];
+        if (node && !node.anchored) {
+          appendPenTrailPoint(nodeId, node.pos, pen.color);
+        }
+      }
+      emit();
+      return { ok: true };
     },
 
     beginCircle(center): Result {
@@ -1728,6 +2197,9 @@ export function createSceneStore(): SceneStore {
 
       state.physics.enabled = enabled;
       resetAllVelocities();
+      if (enabled) {
+        beginPenTrailSession();
+      }
       emit();
     },
 
@@ -1818,6 +2290,7 @@ export function createSceneStore(): SceneStore {
         }
       }
 
+      recordPenTrails();
       emit();
       return { ok: true };
     },

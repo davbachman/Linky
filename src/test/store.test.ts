@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { createEmptyScene, createSceneStore, snapOrCreateNode } from '../model/store';
-import { distance } from '../model/hitTest';
+import { distance, distancePointToSegment } from '../model/hitTest';
 
 describe('store helpers', () => {
   it('snapOrCreateNode reuses existing node in snap radius and creates node outside radius', () => {
@@ -463,88 +463,207 @@ describe('createSceneStore', () => {
     expect(afterDelete.scene.nodes[movingId!].lineConstraintId).toBeNull();
   });
 
-  it('keeps a circle-constrained pivot constrained under mostly tangential dragging', () => {
+  it('binds a newly created stick endpoint to a nearby line constraint', () => {
     const store = createSceneStore();
-    store.addStick({ x: 240, y: 220 }, { x: 340, y: 220 });
 
-    expect(store.beginCircle({ x: 220, y: 220 }).ok).toBe(true);
-    expect(store.updateCirclePreview({ x: 300, y: 220 }).ok).toBe(true);
-    expect(store.endCircle({ x: 300, y: 220 }).ok).toBe(true);
+    expect(store.beginLine({ x: 150, y: 40 }).ok).toBe(true);
+    expect(store.endLine({ x: 150, y: 220 }).ok).toBe(true);
+
+    expect(store.beginStick({ x: 60, y: 110 }).ok).toBe(true);
+    expect(store.endStick({ x: 158, y: 118 }).ok).toBe(true);
 
     const state = store.getState();
-    const movingId = Object.values(state.scene.nodes).find((node) => node.pos.x > 300)?.id;
+    const constrainedNode = Object.values(state.scene.nodes).find((node) => node.lineConstraintId);
+    expect(constrainedNode).toBeDefined();
+    expect(constrainedNode!.lineConstraintId).toBeDefined();
+    expect(constrainedNode!.pos.x).toBeCloseTo(150, 1);
+  });
+
+  it('creates a hinge when a new stick endpoint lands on the interior of an existing stick', () => {
+    const store = createSceneStore();
+
+    expect(store.addStick({ x: 100, y: 100 }, { x: 300, y: 100 }).ok).toBe(true);
+    expect(store.beginStick({ x: 80, y: 220 }).ok).toBe(true);
+    expect(store.endStick({ x: 205, y: 108 }).ok).toBe(true);
+
+    const state = store.getState();
+    expect(Object.keys(state.scene.sticks)).toHaveLength(4);
+
+    const degrees: Record<string, number> = {};
+    for (const nodeId of Object.keys(state.scene.nodes)) {
+      degrees[nodeId] = 0;
+    }
+    for (const stick of Object.values(state.scene.sticks)) {
+      degrees[stick.a] += 1;
+      degrees[stick.b] += 1;
+    }
+
+    const hingeNodeId = Object.keys(degrees).find((id) => degrees[id] >= 3);
+    expect(hingeNodeId).toBeDefined();
+    expect(state.scene.nodes[hingeNodeId!].pos.y).toBeCloseTo(100, 1);
+  });
+
+  it('creates a hinge when moving a stick endpoint onto the interior of another stick', () => {
+    const store = createSceneStore();
+
+    expect(store.addStick({ x: 100, y: 120 }, { x: 320, y: 120 }).ok).toBe(true);
+    expect(store.addStick({ x: 60, y: 210 }, { x: 120, y: 260 }).ok).toBe(true);
+
+    expect(store.tryHandleStickToolClick({ x: 90, y: 235 }).ok).toBe(true);
+    expect(store.tryBeginSelectedStickResizeAt({ x: 120, y: 260 }).ok).toBe(true);
+    expect(store.updateSelectedStickResize({ x: 212, y: 124 }).ok).toBe(true);
+    expect(store.endSelectedStickResize().ok).toBe(true);
+
+    const state = store.getState();
+    expect(Object.keys(state.scene.sticks)).toHaveLength(4);
+
+    const degrees: Record<string, number> = {};
+    for (const nodeId of Object.keys(state.scene.nodes)) {
+      degrees[nodeId] = 0;
+    }
+    for (const stick of Object.values(state.scene.sticks)) {
+      degrees[stick.a] += 1;
+      degrees[stick.b] += 1;
+    }
+
+    const hingeNodeId = Object.keys(degrees).find((id) => degrees[id] >= 3);
+    expect(hingeNodeId).toBeDefined();
+    expect(state.scene.nodes[hingeNodeId!].pos.y).toBeCloseTo(120, 1);
+  });
+
+  it('keeps an interior attachment hinge centered on the host stick during motion', () => {
+    const store = createSceneStore();
+
+    expect(store.addStick({ x: 100, y: 120 }, { x: 320, y: 120 }).ok).toBe(true);
+    expect(store.addStick({ x: 200, y: 210 }, { x: 260, y: 280 }).ok).toBe(true);
+
+    expect(store.tryHandleStickToolClick({ x: 230, y: 245 }).ok).toBe(true);
+    expect(store.tryBeginSelectedStickResizeAt({ x: 260, y: 280 }).ok).toBe(true);
+    expect(store.updateSelectedStickResize({ x: 212, y: 124 }).ok).toBe(true);
+    expect(store.endSelectedStickResize().ok).toBe(true);
+
+    const afterAttach = store.getState();
+    const hiddenAttachment = Object.values(afterAttach.scene.sticks).find(
+      (stick) => stick.visible === false && !!stick.attachmentHostStickId
+    );
+    expect(hiddenAttachment).toBeDefined();
+
+    const host = afterAttach.scene.sticks[hiddenAttachment!.attachmentHostStickId!];
+    expect(host).toBeDefined();
+
+    const hingeId =
+      hiddenAttachment!.a === host.a || hiddenAttachment!.a === host.b
+        ? hiddenAttachment!.b
+        : hiddenAttachment!.a;
+    expect(hingeId).toBeDefined();
+
+    const movingId = Object.keys(afterAttach.scene.nodes).find(
+      (id) =>
+        id !== host.a &&
+        id !== host.b &&
+        id !== hingeId &&
+        Object.values(afterAttach.scene.sticks).some(
+          (stick) => stick.visible !== false && (stick.a === id || stick.b === id)
+        )
+    );
     expect(movingId).toBeDefined();
 
     expect(store.beginDrag(movingId!).ok).toBe(true);
-    expect(store.updateDrag({ x: 298, y: 222 }).ok).toBe(true);
+    expect(store.updateDrag({ x: 260, y: 330 }).ok).toBe(true);
     expect(store.endDrag().ok).toBe(true);
 
-    const afterSnap = store.getState();
-    const snapped = afterSnap.scene.nodes[movingId!];
-    const circle = Object.values(afterSnap.scene.circles)[0];
-    expect(snapped.circleConstraintId).toBeDefined();
-    expect(Math.abs(distance(snapped.pos, circle.center) - circle.radius)).toBeLessThan(0.8);
+    const finalState = store.getState();
+    const finalHost = finalState.scene.sticks[host.id];
+    const hingePos = finalState.scene.nodes[hingeId!].pos;
+    const hostA = finalState.scene.nodes[finalHost.a].pos;
+    const hostB = finalState.scene.nodes[finalHost.b].pos;
+    const offset = distancePointToSegment(hingePos, hostA, hostB);
+    expect(offset).toBeLessThan(0.25);
+  });
 
-    expect(store.beginDrag(movingId!).ok).toBe(true);
-    expect(store.updateDrag({ x: 302, y: 305 }).ok).toBe(true);
+  it('allows responsive dragging of a leaf endpoint after interior attachment with anchors present', () => {
+    const store = createSceneStore();
+
+    expect(store.addStick({ x: 100, y: 120 }, { x: 320, y: 120 }).ok).toBe(true);
+    const hostLeft = Object.keys(store.getState().scene.nodes).find(
+      (id) => store.getState().scene.nodes[id].pos.x === 100
+    );
+    expect(hostLeft).toBeDefined();
+    expect(store.setAnchor(hostLeft!).ok).toBe(true);
+
+    expect(store.beginStick({ x: 250, y: 300 }).ok).toBe(true);
+    expect(store.endStick({ x: 210, y: 124 }).ok).toBe(true);
+
+    const before = store.getState();
+    const leafNodeId = Object.keys(before.scene.nodes).reduce((best, id) => {
+      if (!best) {
+        return id;
+      }
+      return before.scene.nodes[id].pos.y > before.scene.nodes[best].pos.y ? id : best;
+    }, '');
+    const beforeLeaf = { ...before.scene.nodes[leafNodeId].pos };
+
+    expect(store.beginDrag(leafNodeId).ok).toBe(true);
+    expect(store.updateDrag({ x: beforeLeaf.x + 45, y: beforeLeaf.y - 35 }).ok).toBe(true);
     expect(store.endDrag().ok).toBe(true);
 
-    const afterSecondDrag = store.getState().scene.nodes[movingId!];
-    const circleAfter = Object.values(store.getState().scene.circles)[0];
-    expect(Math.abs(distance(afterSecondDrag.pos, circleAfter.center) - circleAfter.radius)).toBeLessThan(
-      0.8
+    const afterLeaf = store.getState().scene.nodes[leafNodeId].pos;
+    expect(distance(afterLeaf, beforeLeaf)).toBeGreaterThan(25);
+  });
+
+  it('assigns pens only to non-anchor pivots and supports hit testing', () => {
+    const store = createSceneStore();
+    expect(store.addStick({ x: 100, y: 100 }, { x: 220, y: 100 }).ok).toBe(true);
+
+    const state = store.getState();
+    const leftId = Object.keys(state.scene.nodes).find((id) => state.scene.nodes[id].pos.x < 160);
+    const rightId = Object.keys(state.scene.nodes).find((id) => state.scene.nodes[id].pos.x > 160);
+    expect(leftId).toBeDefined();
+    expect(rightId).toBeDefined();
+
+    expect(store.setAnchor(leftId!).ok).toBe(true);
+    expect(store.setPen(leftId!).ok).toBe(false);
+    expect(store.setPen(rightId!).ok).toBe(true);
+
+    const after = store.getState();
+    expect(after.pens[rightId!].color).toBe('#7b3fe4');
+    expect(after.pens[rightId!].enabled).toBe(true);
+    expect(store.hitTestPen({ x: after.scene.nodes[rightId!].pos.x, y: after.scene.nodes[rightId!].pos.y })).toBe(
+      rightId
     );
   });
 
-  it('releases a circle-constrained pivot when dragged mostly normal to the circle', () => {
+  it('persists pen trails on stop and resets them on the next play', () => {
     const store = createSceneStore();
-    store.addStick({ x: 240, y: 220 }, { x: 340, y: 220 });
+    expect(store.addStick({ x: 100, y: 100 }, { x: 220, y: 100 }).ok).toBe(true);
 
-    expect(store.beginCircle({ x: 220, y: 220 }).ok).toBe(true);
-    expect(store.endCircle({ x: 300, y: 220 }).ok).toBe(true);
-
-    const movingId = Object.values(store.getState().scene.nodes).find((node) => node.pos.x > 300)?.id;
+    const movingId = Object.keys(store.getState().scene.nodes).find(
+      (id) => store.getState().scene.nodes[id].pos.x > 160
+    );
     expect(movingId).toBeDefined();
+    expect(store.setPen(movingId!).ok).toBe(true);
 
+    store.setPhysicsEnabled(true);
     expect(store.beginDrag(movingId!).ok).toBe(true);
-    expect(store.updateDrag({ x: 298, y: 222 }).ok).toBe(true);
+    expect(store.updateDrag({ x: 265, y: 140 }).ok).toBe(true);
+    expect(store.updateDrag({ x: 280, y: 165 }).ok).toBe(true);
     expect(store.endDrag().ok).toBe(true);
-    expect(store.getState().scene.nodes[movingId!].circleConstraintId).toBeDefined();
+    expect(store.stepPhysics(1 / 60).ok).toBe(true);
 
-    expect(store.beginDrag(movingId!).ok).toBe(true);
-    expect(store.updateDrag({ x: 420, y: 220 }).ok).toBe(true);
-    expect(store.endDrag().ok).toBe(true);
+    const duringPlayPoints =
+      store.getState().penTrails[movingId!]?.reduce((sum, stroke) => sum + stroke.points.length, 0) ?? 0;
+    expect(duringPlayPoints).toBeGreaterThan(2);
 
-    const after = store.getState();
-    const released = after.scene.nodes[movingId!];
-    const circle = Object.values(after.scene.circles)[0];
-    expect(released.circleConstraintId).toBeNull();
-    expect(Math.abs(distance(released.pos, circle.center) - circle.radius)).toBeGreaterThan(10);
+    store.setPhysicsEnabled(false);
+    const afterStopPoints =
+      store.getState().penTrails[movingId!]?.reduce((sum, stroke) => sum + stroke.points.length, 0) ?? 0;
+    expect(afterStopPoints).toBe(duringPlayPoints);
+
+    store.setPhysicsEnabled(true);
+    const afterReplayPoints =
+      store.getState().penTrails[movingId!]?.reduce((sum, stroke) => sum + stroke.points.length, 0) ?? 0;
+    expect(afterReplayPoints).toBeLessThan(duringPlayPoints);
+    expect(afterReplayPoints).toBeLessThanOrEqual(1);
   });
 
-  it('clears node constraints when a selected circle is deleted', () => {
-    const store = createSceneStore();
-    store.addStick({ x: 240, y: 220 }, { x: 340, y: 220 });
-
-    expect(store.beginCircle({ x: 220, y: 220 }).ok).toBe(true);
-    expect(store.endCircle({ x: 300, y: 220 }).ok).toBe(true);
-    const circleId = Object.keys(store.getState().scene.circles)[0];
-    expect(circleId).toBeDefined();
-
-    const movingId = Object.values(store.getState().scene.nodes).find((node) => node.pos.x > 300)?.id;
-    expect(movingId).toBeDefined();
-
-    expect(store.beginDrag(movingId!).ok).toBe(true);
-    expect(store.updateDrag({ x: 298, y: 222 }).ok).toBe(true);
-    expect(store.endDrag().ok).toBe(true);
-    expect(store.getState().scene.nodes[movingId!].circleConstraintId).toBe(circleId);
-
-    store.setTool('circle');
-    expect(store.tryHandleCircleToolClick({ x: 300, y: 220 }).ok).toBe(true);
-    expect(store.deleteSelectedCircle().ok).toBe(true);
-
-    const afterDelete = store.getState();
-    expect(Object.keys(afterDelete.scene.circles)).toHaveLength(0);
-    expect(afterDelete.scene.nodes[movingId!].circleConstraintId).toBeNull();
-  });
 });

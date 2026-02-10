@@ -90,6 +90,49 @@ body {
   display: none;
 }
 
+.pen-context-menu {
+  position: fixed;
+  z-index: 20;
+  min-width: 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid #4b463c;
+  border-radius: 8px;
+  background: #fffaf2;
+  box-shadow: 0 8px 20px rgba(43, 42, 37, 0.22);
+}
+
+.pen-context-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  font-size: 0.92rem;
+  color: #2b2a25;
+}
+
+.pen-context-menu input[type='color'] {
+  width: 40px;
+  height: 28px;
+  border: 1px solid #5b5549;
+  border-radius: 4px;
+  padding: 0;
+  cursor: pointer;
+  background: #faf6ee;
+}
+
+.pen-context-menu button {
+  border: 1px solid #4b463c;
+  background: #faf6ee;
+  color: #2b2a25;
+  padding: 0.4rem 0.55rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
 @media (max-width: 860px) {
   .linkage-canvas {
     height: calc(100vh - 210px);

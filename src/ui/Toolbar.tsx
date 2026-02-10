@@ -3,7 +3,7 @@ import type { ToolMode } from '../model/types';
 type ToolbarProps = {
   tool: ToolMode;
   physicsEnabled: boolean;
-  onToggle: (mode: 'stick' | 'anchor' | 'line' | 'circle') => void;
+  onToggle: (mode: 'stick' | 'anchor' | 'line' | 'pen') => void;
   onSetPhysicsEnabled: (enabled: boolean) => void;
 };
 
@@ -48,13 +48,13 @@ export function Toolbar({
         </button>
         <button
           type="button"
-          data-testid="tool-circle"
-          aria-pressed={tool === 'circle'}
+          data-testid="tool-pen"
+          aria-pressed={tool === 'pen'}
           disabled={physicsEnabled}
-          className={tool === 'circle' ? 'active' : ''}
-          onClick={() => onToggle('circle')}
+          className={tool === 'pen' ? 'active' : ''}
+          onClick={() => onToggle('pen')}
         >
-          Circle
+          Pen
         </button>
       </div>
       <div className="toolbar-right">
