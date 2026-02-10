@@ -23,6 +23,7 @@ import {
   solveComponentPositions
 } from './solver';
 import type {
+  AttachmentConstraint,
   PhysicsDiagnostics,
   PhysicsOptions,
   Result,
@@ -59,7 +60,9 @@ const PHYSICS_DEFAULT_VELOCITY_TOLERANCE = 1e-5;
 const PHYSICS_MAX_SUBSTEPS = 16;
 const PHYSICS_MAX_CONSTRAINT_ITERATIONS = 64;
 const PHYSICS_ENERGY_EPSILON = 1e-9;
+const PHYSICS_STRICT_ENERGY_MAX_RESIDUAL = 0.35;
 const PHYSICS_DIAGNOSTIC_HISTORY_MAX = 512;
+const ATTACHMENT_ENDPOINT_EPSILON = 1e-6;
 const CONSTRAINT_RELEASE_DISTANCE = 16;
 const CONSTRAINT_RELEASE_DIRECTION_RATIO = 1.25;
 const CONSTRAINT_RELEASE_MIN_STEP = 1.5;
@@ -70,7 +73,8 @@ const DEFAULT_PHYSICS_OPTIONS: PhysicsOptions = {
   positionTolerance: PHYSICS_DEFAULT_POSITION_TOLERANCE,
   velocityTolerance: PHYSICS_DEFAULT_VELOCITY_TOLERANCE,
   integratorMode: 'rattle_symplectic',
-  massModel: 'node_mass'
+  massModel: 'node_mass',
+  energyMode: 'strict'
 };
 
 const DEFAULT_PHYSICS_DIAGNOSTICS: PhysicsDiagnostics = {
@@ -78,6 +82,8 @@ const DEFAULT_PHYSICS_DIAGNOSTICS: PhysicsDiagnostics = {
   angularMomentumAboutAnchor: 0,
   constraintViolationL2: 0,
   constraintViolationMax: 0,
+  energyRescaleSkippedDueHighResidual: false,
+  energyRescaleResidualMax: 0,
   relativeJointAngle: null,
   relativeJointAngleHistory: []
 };
@@ -95,6 +101,7 @@ export function createEmptyScene(): Scene {
   return {
     nodes: {},
     sticks: {},
+    attachments: {},
     lines: {},
     circles: {}
   };
@@ -117,7 +124,8 @@ export function snapOrCreateNode(
     pos: { x: point.x, y: point.y },
     anchored: false,
     lineConstraintId: null,
-    circleConstraintId: null
+    circleConstraintId: null,
+    attachmentId: null
   };
 
   return { nodeId, created: true };
@@ -141,6 +149,9 @@ function removeNodeIfIsolated(scene: Scene, nodeId: string): void {
     return;
   }
   if (!nodeHasAnySticks(scene, nodeId)) {
+    if (node.attachmentId) {
+      delete scene.attachments[node.attachmentId];
+    }
     delete scene.nodes[nodeId];
   }
 }
@@ -411,26 +422,6 @@ function shouldReleaseFromLine(line: { a: Vec2; b: Vec2 }, previousRaw: Vec2, ra
   );
 }
 
-function getAttachmentHingeNodeId(scene: Scene, attachmentStickId: string): string | null {
-  const attachment = scene.sticks[attachmentStickId];
-  if (!attachment || attachment.visible !== false || !attachment.attachmentHostStickId) {
-    return null;
-  }
-
-  const host = scene.sticks[attachment.attachmentHostStickId];
-  if (!host) {
-    return null;
-  }
-
-  if (attachment.a === host.a || attachment.a === host.b) {
-    return attachment.b;
-  }
-  if (attachment.b === host.a || attachment.b === host.b) {
-    return attachment.a;
-  }
-  return null;
-}
-
 function enforceComponentConstraints(
   scene: Scene,
   nodeIds: string[],
@@ -439,11 +430,13 @@ function enforceComponentConstraints(
   iterations: number
 ): void {
   const epsilon = 1e-6;
+  const nodeIdSet = new Set(nodeIds);
+  const stickIdSet = new Set(stickIds);
 
   for (let iteration = 0; iteration < iterations; iteration += 1) {
     for (const stickId of stickIds) {
       const stick = scene.sticks[stickId];
-      if (!stick) {
+      if (!stick || stick.visible === false) {
         continue;
       }
       const a = scene.nodes[stick.a];
@@ -511,43 +504,59 @@ function enforceComponentConstraints(
       node.circleConstraintId = null;
     }
 
-    // Keep interior attachments centered on the host stick centerline.
-    const projectedPairs = new Set<string>();
-    for (const stickId of stickIds) {
-      const attachment = scene.sticks[stickId];
-      if (!attachment || attachment.visible !== false || !attachment.attachmentHostStickId) {
+    for (const attachment of Object.values(scene.attachments)) {
+      const attachedNode = scene.nodes[attachment.nodeId];
+      const hostStick = scene.sticks[attachment.hostStickId];
+      if (!attachedNode || !hostStick || hostStick.visible === false) {
+        continue;
+      }
+      if (!stickIdSet.has(hostStick.id)) {
+        continue;
+      }
+      if (
+        !nodeIdSet.has(attachment.nodeId) ||
+        !nodeIdSet.has(hostStick.a) ||
+        !nodeIdSet.has(hostStick.b)
+      ) {
+        continue;
+      }
+      const hostA = scene.nodes[hostStick.a];
+      const hostB = scene.nodes[hostStick.b];
+      if (!hostA || !hostB) {
         continue;
       }
 
-      const host = scene.sticks[attachment.attachmentHostStickId];
-      if (!host) {
-        continue;
-      }
+      const t = attachment.t;
+      const oneMinusT = 1 - t;
+      const solveAxis = (axis: 'x' | 'y'): void => {
+        const c =
+          attachedNode.pos[axis] - (oneMinusT * hostA.pos[axis] + t * hostB.pos[axis]);
+        if (Math.abs(c) <= epsilon) {
+          return;
+        }
 
-      const hingeNodeId = getAttachmentHingeNodeId(scene, stickId);
-      if (!hingeNodeId) {
-        continue;
-      }
-      if (fixedNodeIds.has(hingeNodeId)) {
-        continue;
-      }
+        const invA = fixedNodeIds.has(hostA.id) ? 0 : 1;
+        const invB = fixedNodeIds.has(hostB.id) ? 0 : 1;
+        const invH = fixedNodeIds.has(attachedNode.id) ? 0 : 1;
+        const denom = oneMinusT * oneMinusT * invA + t * t * invB + invH;
+        if (denom <= epsilon) {
+          return;
+        }
 
-      const key = `${host.id}:${hingeNodeId}`;
-      if (projectedPairs.has(key)) {
-        continue;
-      }
-      projectedPairs.add(key);
+        const deltaLambda = -c / denom;
+        if (invA > 0) {
+          hostA.pos[axis] += invA * (-oneMinusT) * deltaLambda;
+        }
+        if (invB > 0) {
+          hostB.pos[axis] += invB * (-t) * deltaLambda;
+        }
+        if (invH > 0) {
+          attachedNode.pos[axis] += invH * deltaLambda;
+        }
+      };
 
-      const hostA = scene.nodes[host.a]?.pos;
-      const hostB = scene.nodes[host.b]?.pos;
-      const hinge = scene.nodes[hingeNodeId];
-      if (!hostA || !hostB || !hinge) {
-        continue;
-      }
-
-      const { projected } = projectPointToSegment(hinge.pos, hostA, hostB);
-      hinge.pos.x = projected.x;
-      hinge.pos.y = projected.y;
+      solveAxis('x');
+      solveAxis('y');
     }
   }
 }
@@ -555,6 +564,7 @@ function enforceComponentConstraints(
 export function createSceneStore(): SceneStore {
   let nodeCounter = 0;
   let stickCounter = 0;
+  let attachmentCounter = 0;
   let lineCounter = 0;
   let circleCounter = 0;
   let draftCreatedStartNodeId: string | null = null;
@@ -563,8 +573,12 @@ export function createSceneStore(): SceneStore {
   const velocities: Record<string, Vec2> = {};
   const positionDistanceLambdas: Record<string, number> = {};
   const positionLineLambdas: Record<string, number> = {};
+  const positionAttachmentXLambdas: Record<string, number> = {};
+  const positionAttachmentYLambdas: Record<string, number> = {};
   const velocityDistanceLambdas: Record<string, number> = {};
   const velocityLineLambdas: Record<string, number> = {};
+  const velocityAttachmentXLambdas: Record<string, number> = {};
+  const velocityAttachmentYLambdas: Record<string, number> = {};
 
   const listeners = new Set<() => void>();
 
@@ -641,6 +655,11 @@ export function createSceneStore(): SceneStore {
     return `stick-${stickCounter}`;
   };
 
+  const nextAttachmentId = (): string => {
+    attachmentCounter += 1;
+    return `attachment-${attachmentCounter}`;
+  };
+
   const nextLineId = (): string => {
     lineCounter += 1;
     return `line-${lineCounter}`;
@@ -675,7 +694,8 @@ export function createSceneStore(): SceneStore {
       pos: { x: point.x, y: point.y },
       anchored: false,
       lineConstraintId: null,
-      circleConstraintId: null
+      circleConstraintId: null,
+      attachmentId: null
     };
     ensureVelocityNode(nodeId);
     return nodeId;
@@ -701,87 +721,135 @@ export function createSceneStore(): SceneStore {
     node.circleConstraintId = null;
   };
 
-  const findExistingAttachmentStickBetween = (
-    aId: string,
-    bId: string,
-    hostStickId: string
-  ): string | null => {
-    for (const stick of Object.values(state.scene.sticks)) {
-      if (stick.visible !== false) {
-        continue;
-      }
-      if (stick.attachmentHostStickId !== hostStickId) {
-        continue;
-      }
-      if (
-        (stick.a === aId && stick.b === bId) ||
-        (stick.a === bId && stick.b === aId)
-      ) {
-        return stick.id;
-      }
-    }
-    return null;
-  };
-
-  const upsertAttachmentStickBetween = (
-    aId: string,
-    bId: string,
-    restLength: number,
-    hostStickId: string
-  ): boolean => {
-    if (restLength < MIN_STICK_LENGTH) {
-      return false;
-    }
-    const existingId = findExistingAttachmentStickBetween(aId, bId, hostStickId);
-    if (existingId) {
-      state.scene.sticks[existingId].restLength = restLength;
-      return true;
-    }
-
-    const stickId = nextStickId();
-    state.scene.sticks[stickId] = {
-      id: stickId,
-      a: aId,
-      b: bId,
-      restLength,
-      visible: false,
-      attachmentHostStickId: hostStickId
-    };
-    ensureVelocityNode(aId);
-    ensureVelocityNode(bId);
-    return true;
-  };
-
-  const attachNodeRigidToStick = (stickId: string, hingeNodeId: string): boolean => {
-    const target = state.scene.sticks[stickId];
-    const hinge = state.scene.nodes[hingeNodeId];
-    if (!target || !hinge) {
-      return false;
-    }
-    if (target.a === hingeNodeId || target.b === hingeNodeId) {
-      return false;
-    }
-
-    const a = state.scene.nodes[target.a];
-    const b = state.scene.nodes[target.b];
-    if (!a || !b) {
-      return false;
-    }
-
-    const lenA = distance(a.pos, hinge.pos);
-    const lenB = distance(hinge.pos, b.pos);
-    if (lenA < MIN_STICK_LENGTH || lenB < MIN_STICK_LENGTH) {
-      return false;
-    }
-
-    const aLinked = upsertAttachmentStickBetween(target.a, hingeNodeId, lenA, stickId);
-    const bLinked = upsertAttachmentStickBetween(hingeNodeId, target.b, lenB, stickId);
-    return aLinked && bLinked;
-  };
-
   const ensureVelocityNode = (nodeId: string): void => {
     if (!velocities[nodeId]) {
       velocities[nodeId] = { x: 0, y: 0 };
+    }
+  };
+
+  const detachAttachmentById = (attachmentId: string): void => {
+    const attachment = state.scene.attachments[attachmentId];
+    if (!attachment) {
+      return;
+    }
+    const node = state.scene.nodes[attachment.nodeId];
+    if (node && node.attachmentId === attachmentId) {
+      node.attachmentId = null;
+    }
+    delete state.scene.attachments[attachmentId];
+  };
+
+  const detachNodeAttachment = (nodeId: string): void => {
+    const node = state.scene.nodes[nodeId];
+    if (!node?.attachmentId) {
+      return;
+    }
+    detachAttachmentById(node.attachmentId);
+  };
+
+  const detachAttachmentsForHostStick = (hostStickId: string): void => {
+    const attachmentIds = Object.values(state.scene.attachments)
+      .filter((attachment) => attachment.hostStickId === hostStickId)
+      .map((attachment) => attachment.id);
+    for (const attachmentId of attachmentIds) {
+      detachAttachmentById(attachmentId);
+    }
+  };
+
+  const updateAttachmentNodePosition = (attachmentId: string): void => {
+    const attachment = state.scene.attachments[attachmentId];
+    if (!attachment) {
+      return;
+    }
+    const node = state.scene.nodes[attachment.nodeId];
+    const hostStick = state.scene.sticks[attachment.hostStickId];
+    if (!node || !hostStick || hostStick.visible === false) {
+      detachAttachmentById(attachmentId);
+      return;
+    }
+    const hostA = state.scene.nodes[hostStick.a];
+    const hostB = state.scene.nodes[hostStick.b];
+    if (!hostA || !hostB) {
+      detachAttachmentById(attachmentId);
+      return;
+    }
+    const t = attachment.t;
+    node.pos.x = hostA.pos.x * (1 - t) + hostB.pos.x * t;
+    node.pos.y = hostA.pos.y * (1 - t) + hostB.pos.y * t;
+  };
+
+  const attachNodeToHostStick = (hostStickId: string, nodeId: string): boolean => {
+    const node = state.scene.nodes[nodeId];
+    const hostStick = state.scene.sticks[hostStickId];
+    if (!node || !hostStick || hostStick.visible === false) {
+      return false;
+    }
+    if (hostStick.a === nodeId || hostStick.b === nodeId) {
+      return false;
+    }
+    const hostA = state.scene.nodes[hostStick.a];
+    const hostB = state.scene.nodes[hostStick.b];
+    if (!hostA || !hostB) {
+      return false;
+    }
+
+    const projection = projectPointToSegment(node.pos, hostA.pos, hostB.pos);
+    if (
+      projection.t <= ATTACHMENT_ENDPOINT_EPSILON ||
+      projection.t >= 1 - ATTACHMENT_ENDPOINT_EPSILON
+    ) {
+      return false;
+    }
+
+    if (node.attachmentId) {
+      const existing = state.scene.attachments[node.attachmentId];
+      if (existing) {
+        if (existing.hostStickId === hostStickId) {
+          existing.t = projection.t;
+          node.lineConstraintId = null;
+          node.circleConstraintId = null;
+          updateAttachmentNodePosition(existing.id);
+          return true;
+        }
+      }
+      detachNodeAttachment(nodeId);
+    }
+
+    const attachmentId = nextAttachmentId();
+    const attachment: AttachmentConstraint = {
+      id: attachmentId,
+      nodeId,
+      hostStickId,
+      t: projection.t
+    };
+    state.scene.attachments[attachmentId] = attachment;
+    node.attachmentId = attachmentId;
+    node.lineConstraintId = null;
+    node.circleConstraintId = null;
+    updateAttachmentNodePosition(attachmentId);
+    ensureVelocityNode(nodeId);
+    return true;
+  };
+
+  const pruneAttachments = (): void => {
+    for (const attachment of Object.values(state.scene.attachments)) {
+      const node = state.scene.nodes[attachment.nodeId];
+      const host = state.scene.sticks[attachment.hostStickId];
+      if (!node || !host || host.visible === false) {
+        detachAttachmentById(attachment.id);
+        continue;
+      }
+      if (node.attachmentId !== attachment.id) {
+        node.attachmentId = attachment.id;
+      }
+    }
+    for (const node of Object.values(state.scene.nodes)) {
+      if (!node.attachmentId) {
+        continue;
+      }
+      if (!state.scene.attachments[node.attachmentId]) {
+        node.attachmentId = null;
+      }
     }
   };
 
@@ -868,6 +936,14 @@ export function createSceneStore(): SceneStore {
     ny: number;
   };
 
+  type AttachmentConstraintRef = {
+    key: string;
+    nodeId: string;
+    hostAId: string;
+    hostBId: string;
+    t: number;
+  };
+
   const clampInteger = (value: number, min: number, max: number): number => {
     if (!Number.isFinite(value)) {
       return min;
@@ -891,12 +967,14 @@ export function createSceneStore(): SceneStore {
   };
 
   const gatherDistanceConstraints = (): DistanceConstraint[] =>
-    Object.values(state.scene.sticks).map((stick) => ({
-      key: stick.id,
-      aId: stick.a,
-      bId: stick.b,
-      restLength: stick.restLength
-    }));
+    Object.values(state.scene.sticks)
+      .filter((stick) => stick.visible !== false)
+      .map((stick) => ({
+        key: stick.id,
+        aId: stick.a,
+        bId: stick.b,
+        restLength: stick.restLength
+      }));
 
   const gatherLineConstraints = (): LineConstraintRef[] => {
     const result: LineConstraintRef[] = [];
@@ -921,6 +999,28 @@ export function createSceneStore(): SceneStore {
         ay: line.a.y,
         nx: -dy / len,
         ny: dx / len
+      });
+    }
+    return result;
+  };
+
+  const gatherAttachmentConstraints = (): AttachmentConstraintRef[] => {
+    const result: AttachmentConstraintRef[] = [];
+    for (const attachment of Object.values(state.scene.attachments)) {
+      const node = state.scene.nodes[attachment.nodeId];
+      const host = state.scene.sticks[attachment.hostStickId];
+      if (!node || !host || host.visible === false) {
+        continue;
+      }
+      if (!state.scene.nodes[host.a] || !state.scene.nodes[host.b]) {
+        continue;
+      }
+      result.push({
+        key: attachment.id,
+        nodeId: attachment.nodeId,
+        hostAId: host.a,
+        hostBId: host.b,
+        t: attachment.t
       });
     }
     return result;
@@ -970,6 +1070,35 @@ export function createSceneStore(): SceneStore {
     node.pos.y += invMass * constraint.ny * lambda;
   };
 
+  const applyAttachmentLambdaToPosition = (
+    constraint: AttachmentConstraintRef,
+    axis: 'x' | 'y',
+    lambda: number
+  ): void => {
+    if (!Number.isFinite(lambda) || Math.abs(lambda) <= 1e-12) {
+      return;
+    }
+    const hostA = state.scene.nodes[constraint.hostAId];
+    const hostB = state.scene.nodes[constraint.hostBId];
+    const node = state.scene.nodes[constraint.nodeId];
+    if (!hostA || !hostB || !node) {
+      return;
+    }
+
+    const t = constraint.t;
+    const oneMinusT = 1 - t;
+    const invA = getInverseMass(hostA.id);
+    const invB = getInverseMass(hostB.id);
+    const invH = getInverseMass(node.id);
+    if (invA + invB + invH <= 1e-9) {
+      return;
+    }
+
+    hostA.pos[axis] += invA * (-oneMinusT) * lambda;
+    hostB.pos[axis] += invB * (-t) * lambda;
+    node.pos[axis] += invH * lambda;
+  };
+
   const applyDistanceLambdaToVelocities = (constraint: DistanceConstraint, lambda: number): void => {
     if (!Number.isFinite(lambda) || Math.abs(lambda) <= 1e-12) {
       return;
@@ -1017,9 +1146,42 @@ export function createSceneStore(): SceneStore {
     velocities[node.id].y += invMass * constraint.ny * lambda;
   };
 
+  const applyAttachmentLambdaToVelocity = (
+    constraint: AttachmentConstraintRef,
+    axis: 'x' | 'y',
+    lambda: number
+  ): void => {
+    if (!Number.isFinite(lambda) || Math.abs(lambda) <= 1e-12) {
+      return;
+    }
+    const hostA = state.scene.nodes[constraint.hostAId];
+    const hostB = state.scene.nodes[constraint.hostBId];
+    const node = state.scene.nodes[constraint.nodeId];
+    if (!hostA || !hostB || !node) {
+      return;
+    }
+
+    const t = constraint.t;
+    const oneMinusT = 1 - t;
+    const invA = getInverseMass(hostA.id);
+    const invB = getInverseMass(hostB.id);
+    const invH = getInverseMass(node.id);
+    if (invA + invB + invH <= 1e-9) {
+      return;
+    }
+
+    ensureVelocityNode(hostA.id);
+    ensureVelocityNode(hostB.id);
+    ensureVelocityNode(node.id);
+    velocities[hostA.id][axis] += invA * (-oneMinusT) * lambda;
+    velocities[hostB.id][axis] += invB * (-t) * lambda;
+    velocities[node.id][axis] += invH * lambda;
+  };
+
   const applyWarmStartPosition = (
     distanceConstraints: DistanceConstraint[],
-    lineConstraints: LineConstraintRef[]
+    lineConstraints: LineConstraintRef[],
+    attachmentConstraints: AttachmentConstraintRef[]
   ): void => {
     for (const constraint of distanceConstraints) {
       applyDistanceLambdaToPositions(constraint, positionDistanceLambdas[constraint.key] ?? 0);
@@ -1027,11 +1189,24 @@ export function createSceneStore(): SceneStore {
     for (const constraint of lineConstraints) {
       applyLineLambdaToPosition(constraint, positionLineLambdas[constraint.key] ?? 0);
     }
+    for (const constraint of attachmentConstraints) {
+      applyAttachmentLambdaToPosition(
+        constraint,
+        'x',
+        positionAttachmentXLambdas[constraint.key] ?? 0
+      );
+      applyAttachmentLambdaToPosition(
+        constraint,
+        'y',
+        positionAttachmentYLambdas[constraint.key] ?? 0
+      );
+    }
   };
 
   const applyWarmStartVelocity = (
     distanceConstraints: DistanceConstraint[],
-    lineConstraints: LineConstraintRef[]
+    lineConstraints: LineConstraintRef[],
+    attachmentConstraints: AttachmentConstraintRef[]
   ): void => {
     for (const constraint of distanceConstraints) {
       applyDistanceLambdaToVelocities(constraint, velocityDistanceLambdas[constraint.key] ?? 0);
@@ -1039,11 +1214,24 @@ export function createSceneStore(): SceneStore {
     for (const constraint of lineConstraints) {
       applyLineLambdaToVelocity(constraint, velocityLineLambdas[constraint.key] ?? 0);
     }
+    for (const constraint of attachmentConstraints) {
+      applyAttachmentLambdaToVelocity(
+        constraint,
+        'x',
+        velocityAttachmentXLambdas[constraint.key] ?? 0
+      );
+      applyAttachmentLambdaToVelocity(
+        constraint,
+        'y',
+        velocityAttachmentYLambdas[constraint.key] ?? 0
+      );
+    }
   };
 
   const solvePositionConstraintsRattle = (
     distanceConstraints: DistanceConstraint[],
     lineConstraints: LineConstraintRef[],
+    attachmentConstraints: AttachmentConstraintRef[],
     iterations: number,
     tolerance: number
   ): void => {
@@ -1106,12 +1294,52 @@ export function createSceneStore(): SceneStore {
         node.pos.x += invMass * constraint.nx * deltaLambda;
         node.pos.y += invMass * constraint.ny * deltaLambda;
       }
+
+      for (const constraint of attachmentConstraints) {
+        const hostA = state.scene.nodes[constraint.hostAId];
+        const hostB = state.scene.nodes[constraint.hostBId];
+        const node = state.scene.nodes[constraint.nodeId];
+        if (!hostA || !hostB || !node) {
+          continue;
+        }
+        const t = constraint.t;
+        const oneMinusT = 1 - t;
+        const invA = getInverseMass(hostA.id);
+        const invB = getInverseMass(hostB.id);
+        const invH = getInverseMass(node.id);
+        const denom = oneMinusT * oneMinusT * invA + t * t * invB + invH;
+        if (denom <= 1e-9) {
+          continue;
+        }
+
+        const solveAxis = (axis: 'x' | 'y'): void => {
+          const c = node.pos[axis] - (oneMinusT * hostA.pos[axis] + t * hostB.pos[axis]);
+          if (Math.abs(c) <= tolerance) {
+            return;
+          }
+          const deltaLambda = -c / denom;
+          if (axis === 'x') {
+            positionAttachmentXLambdas[constraint.key] =
+              (positionAttachmentXLambdas[constraint.key] ?? 0) + deltaLambda;
+          } else {
+            positionAttachmentYLambdas[constraint.key] =
+              (positionAttachmentYLambdas[constraint.key] ?? 0) + deltaLambda;
+          }
+          hostA.pos[axis] += invA * (-oneMinusT) * deltaLambda;
+          hostB.pos[axis] += invB * (-t) * deltaLambda;
+          node.pos[axis] += invH * deltaLambda;
+        };
+
+        solveAxis('x');
+        solveAxis('y');
+      }
     }
   };
 
   const solveVelocityConstraintsRattle = (
     distanceConstraints: DistanceConstraint[],
     lineConstraints: LineConstraintRef[],
+    attachmentConstraints: AttachmentConstraintRef[],
     iterations: number,
     tolerance: number
   ): void => {
@@ -1174,12 +1402,58 @@ export function createSceneStore(): SceneStore {
         velocities[node.id].x += invMass * constraint.nx * deltaLambda;
         velocities[node.id].y += invMass * constraint.ny * deltaLambda;
       }
+
+      for (const constraint of attachmentConstraints) {
+        const hostA = state.scene.nodes[constraint.hostAId];
+        const hostB = state.scene.nodes[constraint.hostBId];
+        const node = state.scene.nodes[constraint.nodeId];
+        if (!hostA || !hostB || !node) {
+          continue;
+        }
+        const t = constraint.t;
+        const oneMinusT = 1 - t;
+        const invA = getInverseMass(hostA.id);
+        const invB = getInverseMass(hostB.id);
+        const invH = getInverseMass(node.id);
+        const denom = oneMinusT * oneMinusT * invA + t * t * invB + invH;
+        if (denom <= 1e-9) {
+          continue;
+        }
+
+        ensureVelocityNode(hostA.id);
+        ensureVelocityNode(hostB.id);
+        ensureVelocityNode(node.id);
+
+        const solveAxis = (axis: 'x' | 'y'): void => {
+          const rel =
+            velocities[node.id][axis] -
+            (oneMinusT * velocities[hostA.id][axis] + t * velocities[hostB.id][axis]);
+          if (Math.abs(rel) <= tolerance) {
+            return;
+          }
+          const deltaLambda = -rel / denom;
+          if (axis === 'x') {
+            velocityAttachmentXLambdas[constraint.key] =
+              (velocityAttachmentXLambdas[constraint.key] ?? 0) + deltaLambda;
+          } else {
+            velocityAttachmentYLambdas[constraint.key] =
+              (velocityAttachmentYLambdas[constraint.key] ?? 0) + deltaLambda;
+          }
+          velocities[hostA.id][axis] += invA * (-oneMinusT) * deltaLambda;
+          velocities[hostB.id][axis] += invB * (-t) * deltaLambda;
+          velocities[node.id][axis] += invH * deltaLambda;
+        };
+
+        solveAxis('x');
+        solveAxis('y');
+      }
     }
   };
 
   const evaluateConstraintViolation = (
     distanceConstraints: DistanceConstraint[],
-    lineConstraints: LineConstraintRef[]
+    lineConstraints: LineConstraintRef[],
+    attachmentConstraints: AttachmentConstraintRef[]
   ): { max: number; l2: number } => {
     let max = 0;
     let sumSq = 0;
@@ -1206,6 +1480,23 @@ export function createSceneStore(): SceneStore {
         constraint.nx * (node.pos.x - constraint.ax) +
         constraint.ny * (node.pos.y - constraint.ay)
       );
+      max = Math.max(max, err);
+      sumSq += err * err;
+      count += 1;
+    }
+
+    for (const constraint of attachmentConstraints) {
+      const hostA = state.scene.nodes[constraint.hostAId];
+      const hostB = state.scene.nodes[constraint.hostBId];
+      const node = state.scene.nodes[constraint.nodeId];
+      if (!hostA || !hostB || !node) {
+        continue;
+      }
+      const t = constraint.t;
+      const oneMinusT = 1 - t;
+      const errX = node.pos.x - (oneMinusT * hostA.pos.x + t * hostB.pos.x);
+      const errY = node.pos.y - (oneMinusT * hostA.pos.y + t * hostB.pos.y);
+      const err = Math.hypot(errX, errY);
       max = Math.max(max, err);
       sumSq += err * err;
       count += 1;
@@ -1317,9 +1608,16 @@ export function createSceneStore(): SceneStore {
 
   const updatePhysicsDiagnostics = (
     distanceConstraints: DistanceConstraint[],
-    lineConstraints: LineConstraintRef[]
+    lineConstraints: LineConstraintRef[],
+    attachmentConstraints: AttachmentConstraintRef[],
+    energyRescaleSkippedDueHighResidual = false,
+    energyRescaleResidualMax = 0
   ): void => {
-    const constraintViolation = evaluateConstraintViolation(distanceConstraints, lineConstraints);
+    const constraintViolation = evaluateConstraintViolation(
+      distanceConstraints,
+      lineConstraints,
+      attachmentConstraints
+    );
     const relativeJointAngle = computeRelativeJointAngle();
     const previousHistory = state.physicsDiagnostics.relativeJointAngleHistory;
     const nextHistory =
@@ -1332,6 +1630,8 @@ export function createSceneStore(): SceneStore {
       angularMomentumAboutAnchor: computeAngularMomentumAboutAnchor(),
       constraintViolationL2: constraintViolation.l2,
       constraintViolationMax: constraintViolation.max,
+      energyRescaleSkippedDueHighResidual,
+      energyRescaleResidualMax,
       relativeJointAngle,
       relativeJointAngleHistory: nextHistory
     };
@@ -1341,8 +1641,12 @@ export function createSceneStore(): SceneStore {
     for (const map of [
       positionDistanceLambdas,
       positionLineLambdas,
+      positionAttachmentXLambdas,
+      positionAttachmentYLambdas,
       velocityDistanceLambdas,
-      velocityLineLambdas
+      velocityLineLambdas,
+      velocityAttachmentXLambdas,
+      velocityAttachmentYLambdas
     ]) {
       for (const key of Object.keys(map)) {
         delete map[key];
@@ -1352,10 +1656,12 @@ export function createSceneStore(): SceneStore {
 
   const pruneConstraintLambdas = (
     distanceConstraints: DistanceConstraint[],
-    lineConstraints: LineConstraintRef[]
+    lineConstraints: LineConstraintRef[],
+    attachmentConstraints: AttachmentConstraintRef[]
   ): void => {
     const activeDistanceKeys = new Set(distanceConstraints.map((constraint) => constraint.key));
     const activeLineKeys = new Set(lineConstraints.map((constraint) => constraint.key));
+    const activeAttachmentKeys = new Set(attachmentConstraints.map((constraint) => constraint.key));
     for (const key of Object.keys(positionDistanceLambdas)) {
       if (!activeDistanceKeys.has(key)) {
         delete positionDistanceLambdas[key];
@@ -1376,12 +1682,33 @@ export function createSceneStore(): SceneStore {
         delete velocityLineLambdas[key];
       }
     }
+    for (const key of Object.keys(positionAttachmentXLambdas)) {
+      if (!activeAttachmentKeys.has(key)) {
+        delete positionAttachmentXLambdas[key];
+      }
+    }
+    for (const key of Object.keys(positionAttachmentYLambdas)) {
+      if (!activeAttachmentKeys.has(key)) {
+        delete positionAttachmentYLambdas[key];
+      }
+    }
+    for (const key of Object.keys(velocityAttachmentXLambdas)) {
+      if (!activeAttachmentKeys.has(key)) {
+        delete velocityAttachmentXLambdas[key];
+      }
+    }
+    for (const key of Object.keys(velocityAttachmentYLambdas)) {
+      if (!activeAttachmentKeys.has(key)) {
+        delete velocityAttachmentYLambdas[key];
+      }
+    }
   };
 
   const runRattleSymplecticSubstep = (dt: number): void => {
     const distanceConstraints = gatherDistanceConstraints();
     const lineConstraints = gatherLineConstraints();
-    pruneConstraintLambdas(distanceConstraints, lineConstraints);
+    const attachmentConstraints = gatherAttachmentConstraints();
+    pruneConstraintLambdas(distanceConstraints, lineConstraints, attachmentConstraints);
     const energyBeforeConstraints = computeKineticEnergy();
 
     const predictedPositions: Record<string, Vec2> = {};
@@ -1397,10 +1724,11 @@ export function createSceneStore(): SceneStore {
       predictedPositions[node.id] = { x: node.pos.x, y: node.pos.y };
     }
 
-    applyWarmStartPosition(distanceConstraints, lineConstraints);
+    applyWarmStartPosition(distanceConstraints, lineConstraints, attachmentConstraints);
     solvePositionConstraintsRattle(
       distanceConstraints,
       lineConstraints,
+      attachmentConstraints,
       state.physicsOptions.constraintIterations,
       state.physicsOptions.positionTolerance
     );
@@ -1418,10 +1746,11 @@ export function createSceneStore(): SceneStore {
       velocities[node.id].y += (node.pos.y - predicted.y) / dt;
     }
 
-    applyWarmStartVelocity(distanceConstraints, lineConstraints);
+    applyWarmStartVelocity(distanceConstraints, lineConstraints, attachmentConstraints);
     solveVelocityConstraintsRattle(
       distanceConstraints,
       lineConstraints,
+      attachmentConstraints,
       state.physicsOptions.constraintIterations,
       state.physicsOptions.velocityTolerance
     );
@@ -1437,6 +1766,12 @@ export function createSceneStore(): SceneStore {
 
     // With no forces/friction, numerical constraint solves should not dissipate energy.
     const energyAfterConstraints = computeKineticEnergy();
+    const violationAfterConstraints = evaluateConstraintViolation(
+      distanceConstraints,
+      lineConstraints,
+      attachmentConstraints
+    );
+    let energyRescaleSkippedDueHighResidual = false;
     if (energyBeforeConstraints <= PHYSICS_ENERGY_EPSILON) {
       for (const node of Object.values(state.scene.nodes)) {
         if (node.anchored) {
@@ -1445,25 +1780,37 @@ export function createSceneStore(): SceneStore {
         velocities[node.id].x = 0;
         velocities[node.id].y = 0;
       }
-    } else if (energyAfterConstraints > PHYSICS_ENERGY_EPSILON) {
-      const scale = Math.sqrt(energyBeforeConstraints / energyAfterConstraints);
-      if (Number.isFinite(scale) && Math.abs(scale - 1) > 1e-12) {
-        for (const node of Object.values(state.scene.nodes)) {
-          if (node.anchored) {
-            continue;
+    } else if (state.physicsOptions.energyMode === 'strict') {
+      if (violationAfterConstraints.max > PHYSICS_STRICT_ENERGY_MAX_RESIDUAL) {
+        energyRescaleSkippedDueHighResidual = true;
+      } else if (energyAfterConstraints > PHYSICS_ENERGY_EPSILON) {
+        const scale = Math.sqrt(energyBeforeConstraints / energyAfterConstraints);
+        if (Number.isFinite(scale) && Math.abs(scale - 1) > 1e-12) {
+          for (const node of Object.values(state.scene.nodes)) {
+            if (node.anchored) {
+              continue;
+            }
+            velocities[node.id].x *= scale;
+            velocities[node.id].y *= scale;
           }
-          velocities[node.id].x *= scale;
-          velocities[node.id].y *= scale;
         }
       }
     }
 
-    updatePhysicsDiagnostics(distanceConstraints, lineConstraints);
+    updatePhysicsDiagnostics(
+      distanceConstraints,
+      lineConstraints,
+      attachmentConstraints,
+      energyRescaleSkippedDueHighResidual,
+      violationAfterConstraints.max
+    );
   };
 
   const runLegacyProjectionSubstep = (dt: number): void => {
     const nodeIds = Object.keys(state.scene.nodes);
-    const stickIds = Object.keys(state.scene.sticks);
+    const stickIds = Object.values(state.scene.sticks)
+      .filter((stick) => stick.visible !== false)
+      .map((stick) => stick.id);
     const fixedNodeIds = new Set<string>(
       nodeIds.filter((nodeId) => state.scene.nodes[nodeId].anchored)
     );
@@ -1503,10 +1850,12 @@ export function createSceneStore(): SceneStore {
 
     const distanceConstraints = gatherDistanceConstraints();
     const lineConstraints = gatherLineConstraints();
-    updatePhysicsDiagnostics(distanceConstraints, lineConstraints);
+    const attachmentConstraints = gatherAttachmentConstraints();
+    updatePhysicsDiagnostics(distanceConstraints, lineConstraints, attachmentConstraints);
   };
 
   const pruneVelocities = (): void => {
+    pruneAttachments();
     for (const nodeId of Object.keys(velocities)) {
       if (!state.scene.nodes[nodeId]) {
         delete velocities[nodeId];
@@ -1626,22 +1975,11 @@ export function createSceneStore(): SceneStore {
       return { ok: false, reason: 'Stick does not exist.' };
     }
 
-    const dependentAttachments = Object.values(state.scene.sticks)
-      .filter(
-        (candidate) => candidate.visible === false && candidate.attachmentHostStickId === stickId
-      );
-
+    detachAttachmentsForHostStick(stickId);
     delete state.scene.sticks[stickId];
-    for (const attachment of dependentAttachments) {
-      delete state.scene.sticks[attachment.id];
-    }
 
     removeNodeIfIsolated(state.scene, stick.a);
     removeNodeIfIsolated(state.scene, stick.b);
-    for (const attachment of dependentAttachments) {
-      removeNodeIfIsolated(state.scene, attachment.a);
-      removeNodeIfIsolated(state.scene, attachment.b);
-    }
 
     if (state.selection.stickId === stickId) {
       clearStickSelection(state);
@@ -1736,6 +2074,7 @@ export function createSceneStore(): SceneStore {
     if (node.anchored) {
       return { ok: false, reason: 'Anchors are deleted via anchor delete.' };
     }
+    detachNodeAttachment(nodeId);
 
     const incidentStickIds = Object.values(state.scene.sticks)
       .filter((stick) => stick.a === nodeId || stick.b === nodeId)
@@ -1746,6 +2085,7 @@ export function createSceneStore(): SceneStore {
       if (!stick) {
         continue;
       }
+      detachAttachmentsForHostStick(stickId);
       delete state.scene.sticks[stickId];
       removeNodeIfIsolated(state.scene, stick.a);
       removeNodeIfIsolated(state.scene, stick.b);
@@ -1837,8 +2177,7 @@ export function createSceneStore(): SceneStore {
         a: startSnap.nodeId,
         b: endSnap.nodeId,
         restLength: len,
-        visible: true,
-        attachmentHostStickId: null
+        visible: true
       };
 
       ensureVelocityNode(startSnap.nodeId);
@@ -1869,7 +2208,7 @@ export function createSceneStore(): SceneStore {
       const rawPointer = { x: pointer.x, y: pointer.y };
       const previousRawPointer = state.drag.rawPointer ?? { x: rawPointer.x, y: rawPointer.y };
       let constrainedPointer = { x: rawPointer.x, y: rawPointer.y };
-      if (activeNode.lineConstraintId) {
+      if (!activeNode.attachmentId && activeNode.lineConstraintId) {
         const line = state.scene.lines[activeNode.lineConstraintId];
         if (line) {
           if (shouldReleaseFromLine(line, previousRawPointer, rawPointer)) {
@@ -1883,7 +2222,7 @@ export function createSceneStore(): SceneStore {
       }
 
       activeNode.circleConstraintId = null;
-      if (!activeNode.lineConstraintId) {
+      if (!activeNode.attachmentId && !activeNode.lineConstraintId) {
         const snapLineId = hitTestLine(state.scene, constrainedPointer, LINE_SNAP_RADIUS);
         if (snapLineId) {
           const line = state.scene.lines[snapLineId];
@@ -2138,8 +2477,7 @@ export function createSceneStore(): SceneStore {
         a: startNodeId,
         b: endNodeId,
         restLength: len,
-        visible: true,
-        attachmentHostStickId: null
+        visible: true
       };
 
       ensureVelocityNode(startNodeId);
@@ -2158,7 +2496,7 @@ export function createSceneStore(): SceneStore {
             x: startTarget.projected.x,
             y: startTarget.projected.y
           };
-          attachNodeRigidToStick(startTarget.stickId, startNodeId);
+          attachNodeToHostStick(startTarget.stickId, startNodeId);
         }
       }
 
@@ -2175,7 +2513,7 @@ export function createSceneStore(): SceneStore {
             x: endTarget.projected.x,
             y: endTarget.projected.y
           };
-          attachNodeRigidToStick(endTarget.stickId, endNodeId);
+          attachNodeToHostStick(endTarget.stickId, endNodeId);
         }
       }
 
@@ -2449,6 +2787,9 @@ export function createSceneStore(): SceneStore {
         return { ok: false, reason: 'Stick resize state is invalid.' };
       }
 
+      if (movingNode.attachmentId) {
+        detachNodeAttachment(movingNode.id);
+      }
       movingNode.pos.x = pointer.x;
       movingNode.pos.y = pointer.y;
       if (movingNode.lineConstraintId) {
@@ -2463,6 +2804,11 @@ export function createSceneStore(): SceneStore {
       }
       movingNode.circleConstraintId = null;
       stick.restLength = distance(fixedNode.pos, movingNode.pos);
+      for (const attachment of Object.values(state.scene.attachments)) {
+        if (attachment.hostStickId === stick.id) {
+          updateAttachmentNodePosition(attachment.id);
+        }
+      }
       ensureVelocityNode(movingNode.id);
       velocities[movingNode.id].x = 0;
       velocities[movingNode.id].y = 0;
@@ -2494,7 +2840,7 @@ export function createSceneStore(): SceneStore {
           );
           if (target) {
             movingNode.pos = { x: target.projected.x, y: target.projected.y };
-            attachNodeRigidToStick(target.stickId, movingNodeId);
+            attachNodeToHostStick(target.stickId, movingNodeId);
             stick.restLength = distance(fixedNode.pos, movingNode.pos);
           }
         }
@@ -2845,7 +3191,9 @@ export function createSceneStore(): SceneStore {
       }
 
       const nodeIds = Object.keys(state.scene.nodes);
-      const stickIds = Object.keys(state.scene.sticks);
+      const stickIds = Object.values(state.scene.sticks)
+        .filter((stick) => stick.visible !== false)
+        .map((stick) => stick.id);
       const fixedNodeIds = new Set<string>(nodeIds.filter((nodeId) => state.scene.nodes[nodeId].anchored));
       enforceComponentConstraints(state.scene, nodeIds, stickIds, fixedNodeIds, 8);
       emit();
@@ -2910,6 +3258,14 @@ export function createSceneStore(): SceneStore {
       return deleteStickById(selectedStickId);
     },
 
+    clearDrawing(): void {
+      if (Object.keys(state.penTrails).length === 0) {
+        return;
+      }
+      clearPenTrails();
+      emit();
+    },
+
     setPhysicsEnabled(enabled: boolean): void {
       if (state.physics.enabled === enabled) {
         return;
@@ -2935,7 +3291,9 @@ export function createSceneStore(): SceneStore {
         pruneVelocities();
         // Enter physics from a zero-momentum state while still satisfying rigid constraints.
         const nodeIds = Object.keys(state.scene.nodes);
-        const stickIds = Object.keys(state.scene.sticks);
+        const stickIds = Object.values(state.scene.sticks)
+          .filter((stick) => stick.visible !== false)
+          .map((stick) => stick.id);
         const fixedNodeIds = new Set<string>(
           nodeIds.filter((nodeId) => state.scene.nodes[nodeId].anchored)
         );
@@ -2997,6 +3355,9 @@ export function createSceneStore(): SceneStore {
       if (opts.massModel === 'node_mass' || opts.massModel === 'rigid_stick') {
         nextOptions.massModel = opts.massModel;
       }
+      if (opts.energyMode === 'strict' || opts.energyMode === 'bounded') {
+        nextOptions.energyMode = opts.energyMode;
+      }
 
       const changed =
         nextOptions.substeps !== state.physicsOptions.substeps ||
@@ -3004,7 +3365,8 @@ export function createSceneStore(): SceneStore {
         nextOptions.positionTolerance !== state.physicsOptions.positionTolerance ||
         nextOptions.velocityTolerance !== state.physicsOptions.velocityTolerance ||
         nextOptions.integratorMode !== state.physicsOptions.integratorMode ||
-        nextOptions.massModel !== state.physicsOptions.massModel;
+        nextOptions.massModel !== state.physicsOptions.massModel ||
+        nextOptions.energyMode !== state.physicsOptions.energyMode;
       if (!changed) {
         return;
       }

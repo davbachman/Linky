@@ -14,6 +14,7 @@ type SceneDebugNode = {
 type SceneDebug = {
   nodes: Record<string, SceneDebugNode>;
   sticks: Record<string, { id: string; a: string; b: string; restLength: number }>;
+  attachments: Record<string, { id: string; nodeId: string; hostStickId: string; t: number }>;
   lines: Record<string, { id: string; a: { x: number; y: number }; b: { x: number; y: number } }>;
   circles: Record<string, { id: string; center: { x: number; y: number }; radius: number }>;
 };
@@ -91,6 +92,18 @@ describe('App integration', () => {
 
     expect(screen.getByTestId('stick-count')).toHaveTextContent('2');
     expect(screen.getByTestId('node-count')).toHaveTextContent('3');
+  });
+
+  it('creates a host-stick attachment constraint when a stick endpoint lands on stick interior', () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId('tool-stick'));
+    drawStick(120, 120, 320, 120, 1);
+    drawStick(210, 230, 225, 124, 2);
+
+    expect(screen.getByTestId('stick-count')).toHaveTextContent('2');
+    const scene = parseScene();
+    expect(Object.keys(scene.attachments)).toHaveLength(1);
   });
 
   it('anchors an existing pivot and renders it as an anchor', () => {
@@ -398,6 +411,46 @@ describe('App integration', () => {
     const moved = after.nodes[moving!.id];
     expect(moved.pos.x).not.toBeCloseTo(moving!.pos.x, 2);
     expect(moved.pos.y).not.toBeCloseTo(moving!.pos.y, 2);
+  });
+
+  it('clears pen drawing when the clear button is pressed', () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId('tool-stick'));
+    drawStick(100, 100, 220, 100, 1);
+
+    const target = canvas();
+    const created = parseScene();
+    const moving = Object.values(created.nodes).find((node) => node.pos.x > 160);
+    expect(moving).toBeDefined();
+
+    fireEvent.click(screen.getByTestId('tool-pen'));
+    fireEvent.pointerDown(target, { clientX: moving!.pos.x, clientY: moving!.pos.y, pointerId: 2 });
+
+    fireEvent.click(screen.getByTestId('physics-play'));
+    fireEvent.pointerDown(target, { clientX: moving!.pos.x, clientY: moving!.pos.y, pointerId: 3 });
+    fireEvent.pointerMove(target, {
+      clientX: moving!.pos.x + 45,
+      clientY: moving!.pos.y + 30,
+      pointerId: 3
+    });
+    fireEvent.pointerUp(target, {
+      clientX: moving!.pos.x + 45,
+      clientY: moving!.pos.y + 30,
+      pointerId: 3
+    });
+
+    const before = parsePenDebug();
+    const beforePoints =
+      (before.penTrails[moving!.id] ?? []).reduce((sum, stroke) => sum + stroke.points.length, 0);
+    expect(beforePoints).toBeGreaterThan(1);
+
+    fireEvent.click(screen.getByTestId('physics-clear'));
+
+    const after = parsePenDebug();
+    const afterPoints =
+      (after.penTrails[moving!.id] ?? []).reduce((sum, stroke) => sum + stroke.points.length, 0);
+    expect(afterPoints).toBe(0);
   });
 
   it('creates/selects/resizes/deletes lines in line mode', () => {

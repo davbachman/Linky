@@ -174,6 +174,10 @@ export default function App({ store }: AppProps): JSX.Element {
             sceneStore.setTool(mode);
           }
         }}
+        onClearDrawing={() => {
+          setPenMenu(null);
+          sceneStore.clearDrawing();
+        }}
         onSetPhysicsEnabled={(enabled) => {
           setPenMenu(null);
           sceneStore.setPhysicsEnabled(enabled);

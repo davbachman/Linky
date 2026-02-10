@@ -269,7 +269,8 @@ describe('createSceneStore', () => {
       positionTolerance: -1,
       velocityTolerance: 0,
       integratorMode: 'legacy_projection',
-      massModel: 'rigid_stick'
+      massModel: 'rigid_stick',
+      energyMode: 'bounded'
     });
 
     const options = store.getState().physicsOptions;
@@ -279,10 +280,12 @@ describe('createSceneStore', () => {
     expect(options.velocityTolerance).toBeGreaterThan(0);
     expect(options.integratorMode).toBe('legacy_projection');
     expect(options.massModel).toBe('rigid_stick');
+    expect(options.energyMode).toBe('bounded');
 
     const diagnostics = store.getPhysicsDiagnostics();
     diagnostics.relativeJointAngleHistory.push(123);
     expect(store.getPhysicsDiagnostics().relativeJointAngleHistory).toHaveLength(0);
+    expect(store.getPhysicsDiagnostics().energyRescaleSkippedDueHighResidual).toBe(false);
   });
 
   it('advances linkage with momentum when physics is enabled', () => {
@@ -363,6 +366,124 @@ describe('createSceneStore', () => {
 
     const violationMax = Math.max(...maxViolations);
     expect(violationMax).toBeLessThan(1.25);
+  });
+
+  it('supports strict and bounded energy modes during physics stepping', () => {
+    const store = createSceneStore();
+    expect(store.addStick({ x: 140, y: 140 }, { x: 320, y: 140 }).ok).toBe(true);
+    expect(store.addStick({ x: 320, y: 140 }, { x: 430, y: 220 }).ok).toBe(true);
+    expect(store.beginStick({ x: 240, y: 60 }).ok).toBe(true);
+    expect(store.endStick({ x: 228, y: 142 }).ok).toBe(true);
+
+    const setup = store.getState();
+    const attachment = Object.values(setup.scene.attachments)[0];
+    expect(attachment).toBeDefined();
+    const host = setup.scene.sticks[attachment.hostStickId];
+    expect(host).toBeDefined();
+    const anchorId =
+      setup.scene.nodes[host.a].pos.x <= setup.scene.nodes[host.b].pos.x ? host.a : host.b;
+    expect(store.setAnchor(anchorId).ok).toBe(true);
+
+    const dragNodeId = Object.keys(setup.scene.nodes)
+      .filter((id) => id !== anchorId && !setup.scene.nodes[id].anchored)
+      .reduce((best, id) =>
+        !best || setup.scene.nodes[id].pos.x > setup.scene.nodes[best].pos.x ? id : best
+      , '');
+    expect(dragNodeId).toBeDefined();
+
+    store.setPhysicsOptions({
+      integratorMode: 'rattle_symplectic',
+      substeps: 1,
+      constraintIterations: 1,
+      energyMode: 'strict'
+    });
+    store.setPhysicsEnabled(true);
+    expect(store.beginDrag(dragNodeId).ok).toBe(true);
+    expect(store.updateDrag({ x: setup.scene.nodes[dragNodeId].pos.x + 90, y: setup.scene.nodes[dragNodeId].pos.y + 70 }).ok).toBe(true);
+    expect(store.endDrag().ok).toBe(true);
+
+    let sawStrictSkip = false;
+    for (let i = 0; i < 120; i += 1) {
+      expect(store.stepPhysics(1 / 60).ok).toBe(true);
+      const diagnostics = store.getPhysicsDiagnostics();
+      if (diagnostics.energyRescaleSkippedDueHighResidual) {
+        sawStrictSkip = true;
+      }
+    }
+    expect(sawStrictSkip).toBe(true);
+
+    store.setPhysicsOptions({ energyMode: 'bounded' });
+    for (let i = 0; i < 40; i += 1) {
+      expect(store.stepPhysics(1 / 60).ok).toBe(true);
+      expect(store.getPhysicsDiagnostics().energyRescaleSkippedDueHighResidual).toBe(false);
+    }
+  });
+
+  it('remains stable for an anchored A/B pendulum with branch stick C attached to B interior', () => {
+    const store = createSceneStore();
+    expect(store.addStick({ x: 180, y: 120 }, { x: 360, y: 160 }).ok).toBe(true);
+    expect(store.addStick({ x: 360, y: 160 }, { x: 500, y: 240 }).ok).toBe(true);
+    expect(store.beginStick({ x: 280, y: 40 }).ok).toBe(true);
+    expect(store.endStick({ x: 270, y: 140 }).ok).toBe(true);
+
+    const setup = store.getState();
+    expect(Object.keys(setup.scene.attachments)).toHaveLength(1);
+    const attachment = Object.values(setup.scene.attachments)[0];
+    const host = setup.scene.sticks[attachment.hostStickId];
+    expect(host).toBeDefined();
+
+    const anchorId =
+      setup.scene.nodes[host.a].pos.x <= setup.scene.nodes[host.b].pos.x ? host.a : host.b;
+    expect(store.setAnchor(anchorId).ok).toBe(true);
+    store.setPhysicsOptions({
+      integratorMode: 'rattle_symplectic',
+      substeps: 4,
+      constraintIterations: 16,
+      energyMode: 'strict'
+    });
+    store.setPhysicsEnabled(true);
+
+    const beforeDrag = store.getState();
+    const dragNodeId = Object.keys(beforeDrag.scene.nodes)
+      .filter((id) => !beforeDrag.scene.nodes[id].anchored)
+      .reduce((best, id) =>
+        !best || beforeDrag.scene.nodes[id].pos.x > beforeDrag.scene.nodes[best].pos.x ? id : best
+      , '');
+    expect(dragNodeId).toBeDefined();
+
+    expect(store.beginDrag(dragNodeId).ok).toBe(true);
+    expect(
+      store.updateDrag({
+        x: beforeDrag.scene.nodes[dragNodeId].pos.x + 100,
+        y: beforeDrag.scene.nodes[dragNodeId].pos.y + 60
+      }).ok
+    ).toBe(true);
+    expect(store.endDrag().ok).toBe(true);
+
+    let maxViolation = 0;
+    for (let i = 0; i < 1600; i += 1) {
+      expect(store.stepPhysics(1 / 60).ok).toBe(true);
+      const state = store.getState();
+      for (const node of Object.values(state.scene.nodes)) {
+        expect(Number.isFinite(node.pos.x)).toBe(true);
+        expect(Number.isFinite(node.pos.y)).toBe(true);
+        expect(Math.abs(node.pos.x)).toBeLessThan(1e5);
+        expect(Math.abs(node.pos.y)).toBeLessThan(1e5);
+      }
+      const diagnostics = store.getPhysicsDiagnostics();
+      maxViolation = Math.max(maxViolation, diagnostics.constraintViolationMax);
+    }
+
+    const finalState = store.getState();
+    const finalAttachment = finalState.scene.attachments[attachment.id];
+    expect(finalAttachment).toBeDefined();
+    const finalHost = finalState.scene.sticks[finalAttachment.hostStickId];
+    expect(finalHost).toBeDefined();
+    const attachedNode = finalState.scene.nodes[finalAttachment.nodeId].pos;
+    const hostA = finalState.scene.nodes[finalHost.a].pos;
+    const hostB = finalState.scene.nodes[finalHost.b].pos;
+    expect(distancePointToSegment(attachedNode, hostA, hostB)).toBeLessThan(0.35);
+    expect(maxViolation).toBeLessThan(3);
   });
 
   it('starts stationary after enabling physics until user drags in physics mode', () => {
@@ -513,20 +634,13 @@ describe('createSceneStore', () => {
     expect(store.endStick({ x: 205, y: 108 }).ok).toBe(true);
 
     const state = store.getState();
-    expect(Object.keys(state.scene.sticks)).toHaveLength(4);
-
-    const degrees: Record<string, number> = {};
-    for (const nodeId of Object.keys(state.scene.nodes)) {
-      degrees[nodeId] = 0;
-    }
-    for (const stick of Object.values(state.scene.sticks)) {
-      degrees[stick.a] += 1;
-      degrees[stick.b] += 1;
-    }
-
-    const hingeNodeId = Object.keys(degrees).find((id) => degrees[id] >= 3);
-    expect(hingeNodeId).toBeDefined();
-    expect(state.scene.nodes[hingeNodeId!].pos.y).toBeCloseTo(100, 1);
+    expect(Object.keys(state.scene.sticks)).toHaveLength(2);
+    expect(Object.keys(state.scene.attachments)).toHaveLength(1);
+    const attachment = Object.values(state.scene.attachments)[0];
+    expect(attachment).toBeDefined();
+    const hingeNode = state.scene.nodes[attachment.nodeId];
+    expect(hingeNode).toBeDefined();
+    expect(hingeNode.pos.y).toBeCloseTo(100, 1);
   });
 
   it('creates a hinge when moving a stick endpoint onto the interior of another stick', () => {
@@ -541,20 +655,13 @@ describe('createSceneStore', () => {
     expect(store.endSelectedStickResize().ok).toBe(true);
 
     const state = store.getState();
-    expect(Object.keys(state.scene.sticks)).toHaveLength(4);
-
-    const degrees: Record<string, number> = {};
-    for (const nodeId of Object.keys(state.scene.nodes)) {
-      degrees[nodeId] = 0;
-    }
-    for (const stick of Object.values(state.scene.sticks)) {
-      degrees[stick.a] += 1;
-      degrees[stick.b] += 1;
-    }
-
-    const hingeNodeId = Object.keys(degrees).find((id) => degrees[id] >= 3);
-    expect(hingeNodeId).toBeDefined();
-    expect(state.scene.nodes[hingeNodeId!].pos.y).toBeCloseTo(120, 1);
+    expect(Object.keys(state.scene.sticks)).toHaveLength(2);
+    expect(Object.keys(state.scene.attachments)).toHaveLength(1);
+    const attachment = Object.values(state.scene.attachments)[0];
+    expect(attachment).toBeDefined();
+    const hingeNode = state.scene.nodes[attachment.nodeId];
+    expect(hingeNode).toBeDefined();
+    expect(hingeNode.pos.y).toBeCloseTo(120, 1);
   });
 
   it('keeps an interior attachment hinge centered on the host stick during motion', () => {
@@ -569,32 +676,22 @@ describe('createSceneStore', () => {
     expect(store.endSelectedStickResize().ok).toBe(true);
 
     const afterAttach = store.getState();
-    const hiddenAttachment = Object.values(afterAttach.scene.sticks).find(
-      (stick) => stick.visible === false && !!stick.attachmentHostStickId
-    );
-    expect(hiddenAttachment).toBeDefined();
+    const attachment = Object.values(afterAttach.scene.attachments)[0];
+    expect(attachment).toBeDefined();
 
-    const host = afterAttach.scene.sticks[hiddenAttachment!.attachmentHostStickId!];
+    const host = afterAttach.scene.sticks[attachment.hostStickId];
     expect(host).toBeDefined();
-
-    const hingeId =
-      hiddenAttachment!.a === host.a || hiddenAttachment!.a === host.b
-        ? hiddenAttachment!.b
-        : hiddenAttachment!.a;
+    const hingeId = attachment.nodeId;
     expect(hingeId).toBeDefined();
 
-    const movingId = Object.keys(afterAttach.scene.nodes).find(
-      (id) =>
-        id !== host.a &&
-        id !== host.b &&
-        id !== hingeId &&
-        Object.values(afterAttach.scene.sticks).some(
-          (stick) => stick.visible !== false && (stick.a === id || stick.b === id)
-        )
+    const movingStick = Object.values(afterAttach.scene.sticks).find(
+      (stick) => stick.visible !== false && (stick.a === hingeId || stick.b === hingeId)
     );
+    expect(movingStick).toBeDefined();
+    const movingId = movingStick!.a === hingeId ? movingStick!.b : movingStick!.a;
     expect(movingId).toBeDefined();
 
-    expect(store.beginDrag(movingId!).ok).toBe(true);
+    expect(store.beginDrag(movingId).ok).toBe(true);
     expect(store.updateDrag({ x: 260, y: 330 }).ok).toBe(true);
     expect(store.endDrag().ok).toBe(true);
 
@@ -690,6 +787,32 @@ describe('createSceneStore', () => {
       store.getState().penTrails[movingId!]?.reduce((sum, stroke) => sum + stroke.points.length, 0) ?? 0;
     expect(afterReplayPoints).toBeLessThan(duringPlayPoints);
     expect(afterReplayPoints).toBeLessThanOrEqual(1);
+  });
+
+  it('clears pen trails with clearDrawing while keeping pens assigned', () => {
+    const store = createSceneStore();
+    expect(store.addStick({ x: 100, y: 100 }, { x: 220, y: 100 }).ok).toBe(true);
+
+    const movingId = Object.keys(store.getState().scene.nodes).find(
+      (id) => store.getState().scene.nodes[id].pos.x > 160
+    );
+    expect(movingId).toBeDefined();
+    expect(store.setPen(movingId!).ok).toBe(true);
+
+    store.setPhysicsEnabled(true);
+    expect(store.beginDrag(movingId!).ok).toBe(true);
+    expect(store.updateDrag({ x: 260, y: 150 }).ok).toBe(true);
+    expect(store.endDrag().ok).toBe(true);
+    expect(store.stepPhysics(1 / 60).ok).toBe(true);
+
+    const beforeClearPoints =
+      store.getState().penTrails[movingId!]?.reduce((sum, stroke) => sum + stroke.points.length, 0) ?? 0;
+    expect(beforeClearPoints).toBeGreaterThan(1);
+
+    store.clearDrawing();
+    const after = store.getState();
+    expect(after.pens[movingId!]).toBeDefined();
+    expect(after.penTrails[movingId!]).toBeUndefined();
   });
 
   it('deletes a selected pen without deleting the pivot or sticks', () => {

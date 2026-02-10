@@ -17,27 +17,31 @@ describe('solveComponentPositions', () => {
           pos: { x: 0, y: 0 },
           anchored: true,
           lineConstraintId: null,
-          circleConstraintId: null
+          circleConstraintId: null,
+          attachmentId: null
         },
         n2: {
           id: 'n2',
           pos: { x: 100, y: 0 },
           anchored: false,
           lineConstraintId: null,
-          circleConstraintId: null
+          circleConstraintId: null,
+          attachmentId: null
         },
         n3: {
           id: 'n3',
           pos: { x: 200, y: 0 },
           anchored: false,
           lineConstraintId: null,
-          circleConstraintId: null
+          circleConstraintId: null,
+          attachmentId: null
         }
       },
       sticks: {
         s1: { id: 's1', a: 'n1', b: 'n2', restLength: 100 },
         s2: { id: 's2', a: 'n2', b: 'n3', restLength: 100 }
       },
+      attachments: {},
       lines: {},
       circles: {}
     };
@@ -66,28 +70,32 @@ describe('solveComponentPositions', () => {
           pos: { x: 0, y: 0 },
           anchored: true,
           lineConstraintId: null,
-          circleConstraintId: null
+          circleConstraintId: null,
+          attachmentId: null
         },
         n2: {
           id: 'n2',
           pos: { x: 100, y: 0 },
           anchored: false,
           lineConstraintId: null,
-          circleConstraintId: null
+          circleConstraintId: null,
+          attachmentId: null
         },
         n3: {
           id: 'n3',
           pos: { x: 100, y: 100 },
           anchored: false,
           lineConstraintId: null,
-          circleConstraintId: null
+          circleConstraintId: null,
+          attachmentId: null
         },
         n4: {
           id: 'n4',
           pos: { x: 0, y: 100 },
           anchored: false,
           lineConstraintId: null,
-          circleConstraintId: null
+          circleConstraintId: null,
+          attachmentId: null
         }
       },
       sticks: {
@@ -96,6 +104,7 @@ describe('solveComponentPositions', () => {
         s3: { id: 's3', a: 'n3', b: 'n4', restLength: 100 },
         s4: { id: 's4', a: 'n4', b: 'n1', restLength: 100 }
       },
+      attachments: {},
       lines: {},
       circles: {}
     };

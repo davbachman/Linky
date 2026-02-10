@@ -11,6 +11,7 @@ export type Node = {
   anchored: boolean;
   lineConstraintId: string | null;
   circleConstraintId: string | null;
+  attachmentId: string | null;
 };
 
 export type Stick = {
@@ -19,7 +20,13 @@ export type Stick = {
   b: string;
   restLength: number;
   visible?: boolean;
-  attachmentHostStickId?: string | null;
+};
+
+export type AttachmentConstraint = {
+  id: string;
+  nodeId: string;
+  hostStickId: string;
+  t: number;
 };
 
 export type LineConstraint = {
@@ -37,6 +44,7 @@ export type CircleConstraint = {
 export type Scene = {
   nodes: Record<string, Node>;
   sticks: Record<string, Stick>;
+  attachments: Record<string, AttachmentConstraint>;
   lines: Record<string, LineConstraint>;
   circles: Record<string, CircleConstraint>;
 };
@@ -117,6 +125,7 @@ export type SolverOptions = {
 export type PhysicsIntegratorMode = 'legacy_projection' | 'rattle_symplectic';
 
 export type MassModel = 'node_mass' | 'rigid_stick';
+export type PhysicsEnergyMode = 'strict' | 'bounded';
 
 export type PhysicsOptions = {
   substeps: number;
@@ -125,6 +134,7 @@ export type PhysicsOptions = {
   velocityTolerance: number;
   integratorMode: PhysicsIntegratorMode;
   massModel: MassModel;
+  energyMode: PhysicsEnergyMode;
 };
 
 export type PhysicsDiagnostics = {
@@ -132,6 +142,8 @@ export type PhysicsDiagnostics = {
   angularMomentumAboutAnchor: number;
   constraintViolationL2: number;
   constraintViolationMax: number;
+  energyRescaleSkippedDueHighResidual: boolean;
+  energyRescaleResidualMax: number;
   relativeJointAngle: number | null;
   relativeJointAngleHistory: number[];
 };
@@ -209,6 +221,7 @@ export interface SceneStore {
   deleteSelectedPivot(): Result;
   deleteSelectedAnchor(): Result;
   deleteSelectedStick(): Result;
+  clearDrawing(): void;
   setPhysicsEnabled(enabled: boolean): void;
   setPhysicsOptions(opts: Partial<PhysicsOptions>): void;
   getPhysicsDiagnostics(): PhysicsDiagnostics;

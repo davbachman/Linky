@@ -11,14 +11,16 @@ describe('hitTestPivot', () => {
         pos: { x: 10, y: 10 },
         anchored: false,
         lineConstraintId: null,
-        circleConstraintId: null
+        circleConstraintId: null,
+        attachmentId: null
       },
       'node-2': {
         id: 'node-2',
         pos: { x: 30, y: 10 },
         anchored: false,
         lineConstraintId: null,
-        circleConstraintId: null
+        circleConstraintId: null,
+        attachmentId: null
       }
     };
 
@@ -33,7 +35,8 @@ describe('hitTestPivot', () => {
         pos: { x: 10, y: 10 },
         anchored: false,
         lineConstraintId: null,
-        circleConstraintId: null
+        circleConstraintId: null,
+        attachmentId: null
       }
     };
 

@@ -3,6 +3,7 @@ import type { Scene, SolverOptions, Vec2 } from './types';
 export type ConnectedComponent = {
   nodeIds: string[];
   stickIds: string[];
+  attachmentIds: string[];
 };
 
 export type SolveResult = {
@@ -24,24 +25,48 @@ const SUBSPACE_PROJECTION_EPSILON = 1e-6;
 
 export function getConnectedComponent(scene: Scene, startNodeId: string): ConnectedComponent {
   if (!scene.nodes[startNodeId]) {
-    return { nodeIds: [], stickIds: [] };
+    return { nodeIds: [], stickIds: [], attachmentIds: [] };
   }
 
-  const adjacency = new Map<string, string[]>();
+  const stickAdjacency = new Map<string, string[]>();
+  const attachmentAdjacency = new Map<string, string[]>();
+  const ensureAdjacencyBuckets = (nodeId: string): void => {
+    if (!stickAdjacency.has(nodeId)) {
+      stickAdjacency.set(nodeId, []);
+    }
+    if (!attachmentAdjacency.has(nodeId)) {
+      attachmentAdjacency.set(nodeId, []);
+    }
+  };
+
   for (const stick of Object.values(scene.sticks)) {
-    if (!adjacency.has(stick.a)) {
-      adjacency.set(stick.a, []);
+    if (stick.visible === false) {
+      continue;
     }
-    if (!adjacency.has(stick.b)) {
-      adjacency.set(stick.b, []);
+    ensureAdjacencyBuckets(stick.a);
+    ensureAdjacencyBuckets(stick.b);
+    stickAdjacency.get(stick.a)?.push(stick.id);
+    stickAdjacency.get(stick.b)?.push(stick.id);
+  }
+
+  for (const attachment of Object.values(scene.attachments)) {
+    const attachedNode = scene.nodes[attachment.nodeId];
+    const host = scene.sticks[attachment.hostStickId];
+    if (!attachedNode || !host || host.visible === false) {
+      continue;
     }
-    adjacency.get(stick.a)?.push(stick.id);
-    adjacency.get(stick.b)?.push(stick.id);
+    ensureAdjacencyBuckets(attachment.nodeId);
+    ensureAdjacencyBuckets(host.a);
+    ensureAdjacencyBuckets(host.b);
+    attachmentAdjacency.get(attachment.nodeId)?.push(attachment.id);
+    attachmentAdjacency.get(host.a)?.push(attachment.id);
+    attachmentAdjacency.get(host.b)?.push(attachment.id);
   }
 
   const queue: string[] = [startNodeId];
   const visitedNodes = new Set<string>([startNodeId]);
   const visitedSticks = new Set<string>();
+  const visitedAttachments = new Set<string>();
 
   while (queue.length > 0) {
     const nodeId = queue.shift();
@@ -49,7 +74,7 @@ export function getConnectedComponent(scene: Scene, startNodeId: string): Connec
       continue;
     }
 
-    for (const stickId of adjacency.get(nodeId) ?? []) {
+    for (const stickId of stickAdjacency.get(nodeId) ?? []) {
       if (visitedSticks.has(stickId)) {
         continue;
       }
@@ -62,11 +87,34 @@ export function getConnectedComponent(scene: Scene, startNodeId: string): Connec
         queue.push(otherNodeId);
       }
     }
+
+    for (const attachmentId of attachmentAdjacency.get(nodeId) ?? []) {
+      if (visitedAttachments.has(attachmentId)) {
+        continue;
+      }
+      visitedAttachments.add(attachmentId);
+      const attachment = scene.attachments[attachmentId];
+      const host = attachment ? scene.sticks[attachment.hostStickId] : null;
+      if (!attachment || !host || host.visible === false) {
+        continue;
+      }
+      const neighbors = [attachment.nodeId, host.a, host.b];
+      for (const neighborId of neighbors) {
+        if (!scene.nodes[neighborId]) {
+          continue;
+        }
+        if (!visitedNodes.has(neighborId)) {
+          visitedNodes.add(neighborId);
+          queue.push(neighborId);
+        }
+      }
+    }
   }
 
   return {
     nodeIds: [...visitedNodes],
-    stickIds: [...visitedSticks]
+    stickIds: [...visitedSticks],
+    attachmentIds: [...visitedAttachments]
   };
 }
 
@@ -102,6 +150,61 @@ export function solveComponentPositions(
   if (draggedIsFixed) {
     fixedNodes.add(draggedNodeId);
   }
+
+  const applyAttachmentPositionConstraint = (attachmentId: string): number => {
+    const attachment = scene.attachments[attachmentId];
+    if (!attachment) {
+      return 0;
+    }
+    const host = scene.sticks[attachment.hostStickId];
+    if (!host || host.visible === false) {
+      return 0;
+    }
+    const hostA = positions[host.a];
+    const hostB = positions[host.b];
+    const attached = positions[attachment.nodeId];
+    if (!hostA || !hostB || !attached) {
+      return 0;
+    }
+
+    const t = attachment.t;
+    const oneMinusT = 1 - t;
+    const aFixed = fixedNodes.has(host.a);
+    const bFixed = fixedNodes.has(host.b);
+    const hFixed = fixedNodes.has(attachment.nodeId);
+
+    let maxAbsError = 0;
+    const solveAxis = (axis: 'x' | 'y'): void => {
+      const c = attached[axis] - (oneMinusT * hostA[axis] + t * hostB[axis]);
+      maxAbsError = Math.max(maxAbsError, Math.abs(c));
+      if (Math.abs(c) <= options.tolerancePx) {
+        return;
+      }
+
+      const invA = aFixed ? 0 : 1;
+      const invB = bFixed ? 0 : 1;
+      const invH = hFixed ? 0 : 1;
+      const denom = oneMinusT * oneMinusT * invA + t * t * invB + invH;
+      if (denom <= EPSILON) {
+        return;
+      }
+
+      const deltaLambda = -c / denom;
+      if (!aFixed) {
+        hostA[axis] += invA * (-oneMinusT) * deltaLambda;
+      }
+      if (!bFixed) {
+        hostB[axis] += invB * (-t) * deltaLambda;
+      }
+      if (!hFixed) {
+        attached[axis] += invH * deltaLambda;
+      }
+    };
+
+    solveAxis('x');
+    solveAxis('y');
+    return maxAbsError;
+  };
 
   let maxError = Number.POSITIVE_INFINITY;
 
@@ -165,6 +268,13 @@ export function solveComponentPositions(
       } else if (!aFixed && bFixed) {
         aPos.x += correctionX;
         aPos.y += correctionY;
+      }
+    }
+
+    for (const attachmentId of component.attachmentIds) {
+      const attachmentError = applyAttachmentPositionConstraint(attachmentId);
+      if (attachmentError > maxError) {
+        maxError = attachmentError;
       }
     }
 
@@ -254,6 +364,59 @@ export function projectDragDeltaToConstraintSubspace(
         aDisp.x += nx * violation;
         aDisp.y += ny * violation;
       }
+    }
+
+    for (const attachmentId of component.attachmentIds) {
+      const attachment = scene.attachments[attachmentId];
+      if (!attachment) {
+        continue;
+      }
+      const host = scene.sticks[attachment.hostStickId];
+      if (!host || host.visible === false) {
+        continue;
+      }
+
+      const aDisp = displacements[host.a];
+      const bDisp = displacements[host.b];
+      const hDisp = displacements[attachment.nodeId];
+      if (!aDisp || !bDisp || !hDisp) {
+        continue;
+      }
+
+      const t = attachment.t;
+      const oneMinusT = 1 - t;
+      const aFixed = fixedNodeIds.has(host.a);
+      const bFixed = fixedNodeIds.has(host.b);
+      const hFixed = fixedNodeIds.has(attachment.nodeId);
+
+      const solveAxis = (axis: 'x' | 'y'): void => {
+        const violation = hDisp[axis] - (oneMinusT * aDisp[axis] + t * bDisp[axis]);
+        if (Math.abs(violation) <= SUBSPACE_PROJECTION_EPSILON) {
+          return;
+        }
+
+        const invA = aFixed ? 0 : 1;
+        const invB = bFixed ? 0 : 1;
+        const invH = hFixed ? 0 : 1;
+        const denom = oneMinusT * oneMinusT * invA + t * t * invB + invH;
+        if (denom <= SUBSPACE_PROJECTION_EPSILON) {
+          return;
+        }
+
+        const deltaLambda = -violation / denom;
+        if (!aFixed) {
+          aDisp[axis] += invA * (-oneMinusT) * deltaLambda;
+        }
+        if (!bFixed) {
+          bDisp[axis] += invB * (-t) * deltaLambda;
+        }
+        if (!hFixed) {
+          hDisp[axis] += invH * deltaLambda;
+        }
+      };
+
+      solveAxis('x');
+      solveAxis('y');
     }
 
     for (const fixedId of fixedNodeIds) {

@@ -4,6 +4,7 @@ type ToolbarProps = {
   tool: ToolMode;
   physicsEnabled: boolean;
   onToggle: (mode: 'stick' | 'anchor' | 'line' | 'pen') => void;
+  onClearDrawing: () => void;
   onSetPhysicsEnabled: (enabled: boolean) => void;
 };
 
@@ -11,6 +12,7 @@ export function Toolbar({
   tool,
   physicsEnabled,
   onToggle,
+  onClearDrawing,
   onSetPhysicsEnabled
 }: ToolbarProps): JSX.Element {
   return (
@@ -66,6 +68,9 @@ export function Toolbar({
           onClick={() => onSetPhysicsEnabled(true)}
         >
           <span aria-hidden="true">▶</span> Play
+        </button>
+        <button type="button" data-testid="physics-clear" onClick={onClearDrawing}>
+          Clear
         </button>
         <button
           type="button"
