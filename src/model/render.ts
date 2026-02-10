@@ -5,7 +5,8 @@ import type {
   Pen,
   PenTrailStroke,
   Scene,
-  SelectionState
+  SelectionState,
+  Vec2
 } from './types';
 
 export const BACKGROUND_COLOR = '#f8f8f6';
@@ -26,6 +27,11 @@ const LINE_AURA_COLOR = 'rgba(43, 108, 230, 0.35)';
 const PEN_DISABLED_COLOR = 'rgba(90, 90, 90, 0.75)';
 const PEN_X_SIZE = 5;
 
+export type CameraView = {
+  zoom: number;
+  pan: Vec2;
+};
+
 export function renderScene(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -35,11 +41,16 @@ export function renderScene(
   penTrails: Record<string, PenTrailStroke[]>,
   createStick: CreateStickState,
   createLine: LineCreateState,
-  selection: SelectionState
+  selection: SelectionState,
+  camera: CameraView
 ): void {
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = BACKGROUND_COLOR;
   ctx.fillRect(0, 0, width, height);
+
+  ctx.save();
+  ctx.translate(camera.pan.x, camera.pan.y);
+  ctx.scale(camera.zoom, camera.zoom);
 
   for (const strokes of Object.values(penTrails)) {
     for (const stroke of strokes) {
@@ -216,4 +227,6 @@ export function renderScene(
     ctx.lineWidth = 2;
     ctx.stroke();
   }
+
+  ctx.restore();
 }

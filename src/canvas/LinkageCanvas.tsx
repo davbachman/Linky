@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
+import type {
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+  WheelEvent as ReactWheelEvent
+} from 'react';
 
 import { renderScene } from '../model/render';
 import type {
@@ -27,7 +31,16 @@ type LinkageCanvasProps = {
   onPenContextMenu: (payload: { nodeId: string; clientX: number; clientY: number } | null) => void;
 };
 
-type InteractionMode = 'stick' | 'drag' | 'resize-stick' | 'line' | 'resize-line' | null;
+type CameraState = {
+  zoom: number;
+  pan: Vec2;
+};
+
+type InteractionMode = 'stick' | 'drag' | 'resize-stick' | 'line' | 'resize-line' | 'pan' | null;
+
+const MIN_ZOOM = 0.2;
+const MAX_ZOOM = 5;
+const ZOOM_SENSITIVITY = 0.0015;
 
 function getCanvasPoint(event: ReactPointerEvent<HTMLCanvasElement>, canvas: HTMLCanvasElement): Vec2 {
   return getCanvasPointFromClient(event.clientX, event.clientY, canvas);
@@ -42,6 +55,13 @@ function getCanvasPointFromClient(
   return {
     x: clientX - rect.left,
     y: clientY - rect.top
+  };
+}
+
+function screenToWorld(point: Vec2, camera: CameraState): Vec2 {
+  return {
+    x: (point.x - camera.pan.x) / camera.zoom,
+    y: (point.y - camera.pan.y) / camera.zoom
   };
 }
 
@@ -60,7 +80,11 @@ export function LinkageCanvas({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const activePointerIdRef = useRef<number | null>(null);
   const activeInteractionRef = useRef<InteractionMode>(null);
+  const panDragStartRef = useRef<{ pointer: Vec2; pan: Vec2 } | null>(null);
+  const spacePressedRef = useRef(false);
+  const cameraRef = useRef<CameraState>({ zoom: 1, pan: { x: 0, y: 0 } });
   const [viewport, setViewport] = useState({ width: 900, height: 600 });
+  const [camera, setCamera] = useState<CameraState>({ zoom: 1, pan: { x: 0, y: 0 } });
 
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -103,6 +127,37 @@ export function LinkageCanvas({
   }, [resizeCanvas]);
 
   useEffect(() => {
+    cameraRef.current = camera;
+  }, [camera]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.code === 'Space') {
+        spacePressedRef.current = true;
+      }
+    };
+
+    const handleKeyUp = (event: KeyboardEvent): void => {
+      if (event.code === 'Space') {
+        spacePressedRef.current = false;
+      }
+    };
+
+    const handleWindowBlur = (): void => {
+      spacePressedRef.current = false;
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleWindowBlur);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleWindowBlur);
+    };
+  }, []);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) {
       return;
@@ -122,7 +177,8 @@ export function LinkageCanvas({
       penTrails,
       createStick,
       createLine,
-      selection
+      selection,
+      camera
     );
   }, [
     scene,
@@ -131,6 +187,7 @@ export function LinkageCanvas({
     createStick,
     createLine,
     selection,
+    camera,
     viewport.height,
     viewport.width,
     renderNonce
@@ -159,7 +216,33 @@ export function LinkageCanvas({
         return;
       }
 
-      const point = getCanvasPoint(event, canvas);
+      const beginPanInteraction = (screenPoint: Vec2): void => {
+        activePointerIdRef.current = event.pointerId;
+        activeInteractionRef.current = 'pan';
+        panDragStartRef.current = {
+          pointer: screenPoint,
+          pan: {
+            x: cameraRef.current.pan.x,
+            y: cameraRef.current.pan.y
+          }
+        };
+        canvas.setPointerCapture(event.pointerId);
+      };
+
+      const screenPoint = getCanvasPoint(event, canvas);
+      const panWithMiddleButton = event.button === 1;
+      const panWithSpaceDrag = event.button === 0 && spacePressedRef.current;
+      if (panWithMiddleButton || panWithSpaceDrag) {
+        event.preventDefault();
+        beginPanInteraction(screenPoint);
+        return;
+      }
+
+      if (event.button !== 0) {
+        return;
+      }
+
+      const point = screenToWorld(screenPoint, cameraRef.current);
 
       const beginStickResize = store.tryBeginSelectedStickResizeAt(point);
       if (beginStickResize.ok) {
@@ -236,6 +319,8 @@ export function LinkageCanvas({
           activePointerIdRef.current = event.pointerId;
           activeInteractionRef.current = 'drag';
           canvas.setPointerCapture(event.pointerId);
+        } else {
+          beginPanInteraction(screenPoint);
         }
       }
     },
@@ -248,7 +333,8 @@ export function LinkageCanvas({
       if (!canvas) {
         return;
       }
-      const point = getCanvasPointFromClient(event.clientX, event.clientY, canvas);
+      const screenPoint = getCanvasPointFromClient(event.clientX, event.clientY, canvas);
+      const point = screenToWorld(screenPoint, cameraRef.current);
       const nodeId = store.hitTestPen(point);
       if (nodeId) {
         event.preventDefault();
@@ -264,6 +350,32 @@ export function LinkageCanvas({
     [onPenContextMenu, store]
   );
 
+  const handleWheel = useCallback((event: ReactWheelEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    event.preventDefault();
+
+    const screenPoint = getCanvasPointFromClient(event.clientX, event.clientY, canvas);
+    setCamera((previous) => {
+      const zoomFactor = Math.exp(-event.deltaY * ZOOM_SENSITIVITY);
+      const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, previous.zoom * zoomFactor));
+      if (Math.abs(nextZoom - previous.zoom) < 1e-6) {
+        return previous;
+      }
+
+      const worldAtCursor = screenToWorld(screenPoint, previous);
+      return {
+        zoom: nextZoom,
+        pan: {
+          x: screenPoint.x - worldAtCursor.x * nextZoom,
+          y: screenPoint.y - worldAtCursor.y * nextZoom
+        }
+      };
+    });
+  }, []);
+
   const handlePointerMove = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current;
@@ -274,7 +386,22 @@ export function LinkageCanvas({
         return;
       }
 
-      const point = getCanvasPoint(event, canvas);
+      const screenPoint = getCanvasPoint(event, canvas);
+      if (activeInteractionRef.current === 'pan') {
+        const panStart = panDragStartRef.current;
+        if (panStart) {
+          setCamera((previous) => ({
+            zoom: previous.zoom,
+            pan: {
+              x: panStart.pan.x + (screenPoint.x - panStart.pointer.x),
+              y: panStart.pan.y + (screenPoint.y - panStart.pointer.y)
+            }
+          }));
+        }
+        return;
+      }
+
+      const point = screenToWorld(screenPoint, cameraRef.current);
 
       if (activeInteractionRef.current === 'stick') {
         store.updateStickPreview(point);
@@ -302,7 +429,8 @@ export function LinkageCanvas({
           return;
         }
 
-        const point = getCanvasPoint(event, canvas);
+        const screenPoint = getCanvasPoint(event, canvas);
+        const point = screenToWorld(screenPoint, cameraRef.current);
 
         if (activeInteractionRef.current === 'stick') {
           store.endStick(point);
@@ -314,6 +442,8 @@ export function LinkageCanvas({
           store.endSelectedLineResize();
         } else if (activeInteractionRef.current === 'drag') {
           store.endDrag();
+        } else if (activeInteractionRef.current === 'pan') {
+          panDragStartRef.current = null;
         }
 
         canvas.releasePointerCapture(event.pointerId);
@@ -340,6 +470,8 @@ export function LinkageCanvas({
           store.endSelectedStickResize();
         } else if (activeInteractionRef.current === 'resize-line') {
           store.endSelectedLineResize();
+        } else if (activeInteractionRef.current === 'pan') {
+          panDragStartRef.current = null;
         }
 
         canvas.releasePointerCapture(event.pointerId);
@@ -359,6 +491,7 @@ export function LinkageCanvas({
       onPointerUp={finishInteraction}
       onPointerCancel={cancelInteraction}
       onContextMenu={handleContextMenu}
+      onWheel={handleWheel}
     />
   );
 }

@@ -553,4 +553,45 @@ describe('App integration', () => {
     expect(Object.values(parsePenDebug().pens)[0].enabled).toBe(false);
   });
 
+  it('pans the viewport with space-drag and keeps interaction points in world space', () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId('tool-stick'));
+    const target = canvas();
+
+    fireEvent.keyDown(window, { code: 'Space' });
+    fireEvent.pointerDown(target, { clientX: 420, clientY: 280, pointerId: 40, button: 0 });
+    fireEvent.pointerMove(target, { clientX: 520, clientY: 340, pointerId: 40, button: 0 });
+    fireEvent.pointerUp(target, { clientX: 520, clientY: 340, pointerId: 40, button: 0 });
+    fireEvent.keyUp(window, { code: 'Space' });
+
+    drawStick(500, 300, 600, 300, 41);
+
+    const scene = parseScene();
+    const nodes = Object.values(scene.nodes);
+    expect(nodes).toHaveLength(2);
+    const left = nodes.reduce((best, node) => (node.pos.x < best.pos.x ? node : best), nodes[0]);
+    const right = nodes.reduce((best, node) => (node.pos.x > best.pos.x ? node : best), nodes[0]);
+    expect(left.pos.x).toBeCloseTo(400, 1);
+    expect(left.pos.y).toBeCloseTo(240, 1);
+    expect(right.pos.x).toBeCloseTo(500, 1);
+    expect(right.pos.y).toBeCloseTo(240, 1);
+  });
+
+  it('zooms with mouse wheel and maps drag creation using zoomed world coordinates', () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId('tool-stick'));
+    const target = canvas();
+    fireEvent.wheel(target, { clientX: 450, clientY: 300, deltaY: -600 });
+
+    drawStick(200, 200, 300, 200, 42);
+
+    const scene = parseScene();
+    const stick = Object.values(scene.sticks)[0];
+    expect(stick).toBeDefined();
+    expect(stick.restLength).toBeGreaterThan(15);
+    expect(stick.restLength).toBeLessThan(90);
+  });
+
 });

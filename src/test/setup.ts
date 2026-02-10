@@ -91,6 +91,10 @@ class MockCanvasContext2D {
     this.__ops.push({ type: 'translate', x, y });
   };
 
+  scale = (x: number, y: number): void => {
+    this.__ops.push({ type: 'scale', x, y });
+  };
+
   rotate = (angle: number): void => {
     this.__ops.push({ type: 'rotate', angle });
   };
