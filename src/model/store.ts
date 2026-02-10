@@ -22,7 +22,15 @@ import {
   projectDragDeltaToConstraintSubspace,
   solveComponentPositions
 } from './solver';
-import type { Result, Scene, SceneStore, SceneStoreState, Vec2 } from './types';
+import type {
+  PhysicsDiagnostics,
+  PhysicsOptions,
+  Result,
+  Scene,
+  SceneStore,
+  SceneStoreState,
+  Vec2
+} from './types';
 
 export const MIN_STICK_LENGTH = 6;
 export const SNAP_RADIUS = DEFAULT_SNAP_RADIUS;
@@ -44,10 +52,35 @@ const CONSTRAINED_SOLVER_TOLERANCE_PX = 0.005;
 const PHYSICS_CONSTRAINT_ITERATIONS = 30;
 const PHYSICS_MAX_STEP_SECONDS = 1 / 120;
 const DRAG_VELOCITY_MIN_DT_SECONDS = 1 / 240;
+const PHYSICS_DEFAULT_SUBSTEPS = 4;
+const PHYSICS_DEFAULT_CONSTRAINT_ITERATIONS = 12;
+const PHYSICS_DEFAULT_POSITION_TOLERANCE = 1e-4;
+const PHYSICS_DEFAULT_VELOCITY_TOLERANCE = 1e-5;
+const PHYSICS_MAX_SUBSTEPS = 16;
+const PHYSICS_MAX_CONSTRAINT_ITERATIONS = 64;
 const PHYSICS_ENERGY_EPSILON = 1e-9;
+const PHYSICS_DIAGNOSTIC_HISTORY_MAX = 512;
 const CONSTRAINT_RELEASE_DISTANCE = 16;
 const CONSTRAINT_RELEASE_DIRECTION_RATIO = 1.25;
 const CONSTRAINT_RELEASE_MIN_STEP = 1.5;
+
+const DEFAULT_PHYSICS_OPTIONS: PhysicsOptions = {
+  substeps: PHYSICS_DEFAULT_SUBSTEPS,
+  constraintIterations: PHYSICS_DEFAULT_CONSTRAINT_ITERATIONS,
+  positionTolerance: PHYSICS_DEFAULT_POSITION_TOLERANCE,
+  velocityTolerance: PHYSICS_DEFAULT_VELOCITY_TOLERANCE,
+  integratorMode: 'rattle_symplectic',
+  massModel: 'node_mass'
+};
+
+const DEFAULT_PHYSICS_DIAGNOSTICS: PhysicsDiagnostics = {
+  totalKineticEnergy: 0,
+  angularMomentumAboutAnchor: 0,
+  constraintViolationL2: 0,
+  constraintViolationMax: 0,
+  relativeJointAngle: null,
+  relativeJointAngleHistory: []
+};
 
 export type SnapResult = {
   nodeId: string;
@@ -121,6 +154,10 @@ function clearAnchorSelection(state: SceneStoreState): void {
   state.selection.anchorNodeId = null;
 }
 
+function clearPenSelection(state: SceneStoreState): void {
+  state.selection.penNodeId = null;
+}
+
 function clearPivotSelection(state: SceneStoreState): void {
   state.selection.pivotNodeId = null;
 }
@@ -168,6 +205,7 @@ function clearCircleResize(state: SceneStoreState): void {
 
 function clearAllSelections(state: SceneStoreState): void {
   clearAnchorSelection(state);
+  clearPenSelection(state);
   clearPivotSelection(state);
   clearStickSelection(state);
   clearLineSelection(state);
@@ -312,6 +350,11 @@ function setAnchorSelection(state: SceneStoreState, nodeId: string): void {
 function setPivotSelection(state: SceneStoreState, nodeId: string): void {
   clearAllSelections(state);
   state.selection.pivotNodeId = nodeId;
+}
+
+function setPenSelection(state: SceneStoreState, nodeId: string): void {
+  clearAllSelections(state);
+  state.selection.penNodeId = nodeId;
 }
 
 function setStickSelection(state: SceneStoreState, stickId: string): void {
@@ -518,6 +561,10 @@ export function createSceneStore(): SceneStore {
   let draftStartInteriorTarget = false;
   let lastDragUpdateMs: number | null = null;
   const velocities: Record<string, Vec2> = {};
+  const positionDistanceLambdas: Record<string, number> = {};
+  const positionLineLambdas: Record<string, number> = {};
+  const velocityDistanceLambdas: Record<string, number> = {};
+  const velocityLineLambdas: Record<string, number> = {};
 
   const listeners = new Set<() => void>();
 
@@ -545,6 +592,7 @@ export function createSceneStore(): SceneStore {
     },
     selection: {
       anchorNodeId: null,
+      penNodeId: null,
       pivotNodeId: null,
       stickId: null,
       lineId: null,
@@ -570,6 +618,8 @@ export function createSceneStore(): SceneStore {
       iterations: DEFAULT_SOLVER_OPTIONS.iterations,
       tolerancePx: DEFAULT_SOLVER_OPTIONS.tolerancePx
     },
+    physicsOptions: { ...DEFAULT_PHYSICS_OPTIONS },
+    physicsDiagnostics: { ...DEFAULT_PHYSICS_DIAGNOSTICS, relativeJointAngleHistory: [] },
     physics: {
       enabled: false
     }
@@ -736,8 +786,8 @@ export function createSceneStore(): SceneStore {
   };
 
   const removePenForNode = (nodeId: string): void => {
-    if (state.selection.pivotNodeId === nodeId && state.scene.nodes[nodeId]?.anchored) {
-      clearPivotSelection(state);
+    if (state.selection.penNodeId === nodeId) {
+      clearPenSelection(state);
     }
     delete state.pens[nodeId];
     delete state.penTrails[nodeId];
@@ -802,6 +852,660 @@ export function createSceneStore(): SceneStore {
     recordPenTrails();
   };
 
+  type DistanceConstraint = {
+    key: string;
+    aId: string;
+    bId: string;
+    restLength: number;
+  };
+
+  type LineConstraintRef = {
+    key: string;
+    nodeId: string;
+    ax: number;
+    ay: number;
+    nx: number;
+    ny: number;
+  };
+
+  const clampInteger = (value: number, min: number, max: number): number => {
+    if (!Number.isFinite(value)) {
+      return min;
+    }
+    return Math.max(min, Math.min(max, Math.round(value)));
+  };
+
+  const clampPositive = (value: number, fallback: number): number => {
+    if (!Number.isFinite(value) || value <= 0) {
+      return fallback;
+    }
+    return value;
+  };
+
+  const getInverseMass = (nodeId: string): number => {
+    const node = state.scene.nodes[nodeId];
+    if (!node || node.anchored) {
+      return 0;
+    }
+    return 1;
+  };
+
+  const gatherDistanceConstraints = (): DistanceConstraint[] =>
+    Object.values(state.scene.sticks).map((stick) => ({
+      key: stick.id,
+      aId: stick.a,
+      bId: stick.b,
+      restLength: stick.restLength
+    }));
+
+  const gatherLineConstraints = (): LineConstraintRef[] => {
+    const result: LineConstraintRef[] = [];
+    for (const node of Object.values(state.scene.nodes)) {
+      if (node.anchored || !node.lineConstraintId) {
+        continue;
+      }
+      const line = state.scene.lines[node.lineConstraintId];
+      if (!line) {
+        continue;
+      }
+      const dx = line.b.x - line.a.x;
+      const dy = line.b.y - line.a.y;
+      const len = Math.hypot(dx, dy);
+      if (len <= 1e-9) {
+        continue;
+      }
+      result.push({
+        key: `${node.id}:${line.id}`,
+        nodeId: node.id,
+        ax: line.a.x,
+        ay: line.a.y,
+        nx: -dy / len,
+        ny: dx / len
+      });
+    }
+    return result;
+  };
+
+  const applyDistanceLambdaToPositions = (constraint: DistanceConstraint, lambda: number): void => {
+    if (!Number.isFinite(lambda) || Math.abs(lambda) <= 1e-12) {
+      return;
+    }
+    const a = state.scene.nodes[constraint.aId];
+    const b = state.scene.nodes[constraint.bId];
+    if (!a || !b) {
+      return;
+    }
+    const dx = b.pos.x - a.pos.x;
+    const dy = b.pos.y - a.pos.y;
+    const len = Math.hypot(dx, dy);
+    if (len <= 1e-9) {
+      return;
+    }
+    const nx = dx / len;
+    const ny = dy / len;
+    const invMa = getInverseMass(a.id);
+    const invMb = getInverseMass(b.id);
+    if (invMa + invMb <= 1e-9) {
+      return;
+    }
+    a.pos.x += -invMa * nx * lambda;
+    a.pos.y += -invMa * ny * lambda;
+    b.pos.x += invMb * nx * lambda;
+    b.pos.y += invMb * ny * lambda;
+  };
+
+  const applyLineLambdaToPosition = (constraint: LineConstraintRef, lambda: number): void => {
+    if (!Number.isFinite(lambda) || Math.abs(lambda) <= 1e-12) {
+      return;
+    }
+    const node = state.scene.nodes[constraint.nodeId];
+    if (!node) {
+      return;
+    }
+    const invMass = getInverseMass(node.id);
+    if (invMass <= 1e-9) {
+      return;
+    }
+    node.pos.x += invMass * constraint.nx * lambda;
+    node.pos.y += invMass * constraint.ny * lambda;
+  };
+
+  const applyDistanceLambdaToVelocities = (constraint: DistanceConstraint, lambda: number): void => {
+    if (!Number.isFinite(lambda) || Math.abs(lambda) <= 1e-12) {
+      return;
+    }
+    const a = state.scene.nodes[constraint.aId];
+    const b = state.scene.nodes[constraint.bId];
+    if (!a || !b) {
+      return;
+    }
+    const dx = b.pos.x - a.pos.x;
+    const dy = b.pos.y - a.pos.y;
+    const len = Math.hypot(dx, dy);
+    if (len <= 1e-9) {
+      return;
+    }
+    const nx = dx / len;
+    const ny = dy / len;
+    const invMa = getInverseMass(a.id);
+    const invMb = getInverseMass(b.id);
+    if (invMa + invMb <= 1e-9) {
+      return;
+    }
+    ensureVelocityNode(a.id);
+    ensureVelocityNode(b.id);
+    velocities[a.id].x += -invMa * nx * lambda;
+    velocities[a.id].y += -invMa * ny * lambda;
+    velocities[b.id].x += invMb * nx * lambda;
+    velocities[b.id].y += invMb * ny * lambda;
+  };
+
+  const applyLineLambdaToVelocity = (constraint: LineConstraintRef, lambda: number): void => {
+    if (!Number.isFinite(lambda) || Math.abs(lambda) <= 1e-12) {
+      return;
+    }
+    const node = state.scene.nodes[constraint.nodeId];
+    if (!node) {
+      return;
+    }
+    const invMass = getInverseMass(node.id);
+    if (invMass <= 1e-9) {
+      return;
+    }
+    ensureVelocityNode(node.id);
+    velocities[node.id].x += invMass * constraint.nx * lambda;
+    velocities[node.id].y += invMass * constraint.ny * lambda;
+  };
+
+  const applyWarmStartPosition = (
+    distanceConstraints: DistanceConstraint[],
+    lineConstraints: LineConstraintRef[]
+  ): void => {
+    for (const constraint of distanceConstraints) {
+      applyDistanceLambdaToPositions(constraint, positionDistanceLambdas[constraint.key] ?? 0);
+    }
+    for (const constraint of lineConstraints) {
+      applyLineLambdaToPosition(constraint, positionLineLambdas[constraint.key] ?? 0);
+    }
+  };
+
+  const applyWarmStartVelocity = (
+    distanceConstraints: DistanceConstraint[],
+    lineConstraints: LineConstraintRef[]
+  ): void => {
+    for (const constraint of distanceConstraints) {
+      applyDistanceLambdaToVelocities(constraint, velocityDistanceLambdas[constraint.key] ?? 0);
+    }
+    for (const constraint of lineConstraints) {
+      applyLineLambdaToVelocity(constraint, velocityLineLambdas[constraint.key] ?? 0);
+    }
+  };
+
+  const solvePositionConstraintsRattle = (
+    distanceConstraints: DistanceConstraint[],
+    lineConstraints: LineConstraintRef[],
+    iterations: number,
+    tolerance: number
+  ): void => {
+    for (let i = 0; i < iterations; i += 1) {
+      for (const constraint of distanceConstraints) {
+        const a = state.scene.nodes[constraint.aId];
+        const b = state.scene.nodes[constraint.bId];
+        if (!a || !b) {
+          continue;
+        }
+        const invMa = getInverseMass(a.id);
+        const invMb = getInverseMass(b.id);
+        const weight = invMa + invMb;
+        if (weight <= 1e-9) {
+          continue;
+        }
+
+        const dx = b.pos.x - a.pos.x;
+        const dy = b.pos.y - a.pos.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist <= 1e-9) {
+          continue;
+        }
+        const c = dist - constraint.restLength;
+        if (Math.abs(c) <= tolerance) {
+          continue;
+        }
+
+        const nx = dx / dist;
+        const ny = dy / dist;
+        const deltaLambda = -c / weight;
+        positionDistanceLambdas[constraint.key] =
+          (positionDistanceLambdas[constraint.key] ?? 0) + deltaLambda;
+
+        a.pos.x += -invMa * nx * deltaLambda;
+        a.pos.y += -invMa * ny * deltaLambda;
+        b.pos.x += invMb * nx * deltaLambda;
+        b.pos.y += invMb * ny * deltaLambda;
+      }
+
+      for (const constraint of lineConstraints) {
+        const node = state.scene.nodes[constraint.nodeId];
+        if (!node) {
+          continue;
+        }
+        const invMass = getInverseMass(node.id);
+        if (invMass <= 1e-9) {
+          continue;
+        }
+        const c =
+          constraint.nx * (node.pos.x - constraint.ax) +
+          constraint.ny * (node.pos.y - constraint.ay);
+        if (Math.abs(c) <= tolerance) {
+          continue;
+        }
+
+        const deltaLambda = -c / invMass;
+        positionLineLambdas[constraint.key] = (positionLineLambdas[constraint.key] ?? 0) + deltaLambda;
+
+        node.pos.x += invMass * constraint.nx * deltaLambda;
+        node.pos.y += invMass * constraint.ny * deltaLambda;
+      }
+    }
+  };
+
+  const solveVelocityConstraintsRattle = (
+    distanceConstraints: DistanceConstraint[],
+    lineConstraints: LineConstraintRef[],
+    iterations: number,
+    tolerance: number
+  ): void => {
+    for (let i = 0; i < iterations; i += 1) {
+      for (const constraint of distanceConstraints) {
+        const a = state.scene.nodes[constraint.aId];
+        const b = state.scene.nodes[constraint.bId];
+        if (!a || !b) {
+          continue;
+        }
+        const invMa = getInverseMass(a.id);
+        const invMb = getInverseMass(b.id);
+        const weight = invMa + invMb;
+        if (weight <= 1e-9) {
+          continue;
+        }
+        ensureVelocityNode(a.id);
+        ensureVelocityNode(b.id);
+
+        const dx = b.pos.x - a.pos.x;
+        const dy = b.pos.y - a.pos.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist <= 1e-9) {
+          continue;
+        }
+        const nx = dx / dist;
+        const ny = dy / dist;
+        const rel =
+          nx * (velocities[b.id].x - velocities[a.id].x) +
+          ny * (velocities[b.id].y - velocities[a.id].y);
+        if (Math.abs(rel) <= tolerance) {
+          continue;
+        }
+
+        const deltaLambda = -rel / weight;
+        velocityDistanceLambdas[constraint.key] =
+          (velocityDistanceLambdas[constraint.key] ?? 0) + deltaLambda;
+        velocities[a.id].x += -invMa * nx * deltaLambda;
+        velocities[a.id].y += -invMa * ny * deltaLambda;
+        velocities[b.id].x += invMb * nx * deltaLambda;
+        velocities[b.id].y += invMb * ny * deltaLambda;
+      }
+
+      for (const constraint of lineConstraints) {
+        const node = state.scene.nodes[constraint.nodeId];
+        if (!node) {
+          continue;
+        }
+        const invMass = getInverseMass(node.id);
+        if (invMass <= 1e-9) {
+          continue;
+        }
+        ensureVelocityNode(node.id);
+        const rel = constraint.nx * velocities[node.id].x + constraint.ny * velocities[node.id].y;
+        if (Math.abs(rel) <= tolerance) {
+          continue;
+        }
+        const deltaLambda = -rel / invMass;
+        velocityLineLambdas[constraint.key] = (velocityLineLambdas[constraint.key] ?? 0) + deltaLambda;
+        velocities[node.id].x += invMass * constraint.nx * deltaLambda;
+        velocities[node.id].y += invMass * constraint.ny * deltaLambda;
+      }
+    }
+  };
+
+  const evaluateConstraintViolation = (
+    distanceConstraints: DistanceConstraint[],
+    lineConstraints: LineConstraintRef[]
+  ): { max: number; l2: number } => {
+    let max = 0;
+    let sumSq = 0;
+    let count = 0;
+
+    for (const constraint of distanceConstraints) {
+      const a = state.scene.nodes[constraint.aId];
+      const b = state.scene.nodes[constraint.bId];
+      if (!a || !b) {
+        continue;
+      }
+      const err = Math.abs(distance(a.pos, b.pos) - constraint.restLength);
+      max = Math.max(max, err);
+      sumSq += err * err;
+      count += 1;
+    }
+
+    for (const constraint of lineConstraints) {
+      const node = state.scene.nodes[constraint.nodeId];
+      if (!node) {
+        continue;
+      }
+      const err = Math.abs(
+        constraint.nx * (node.pos.x - constraint.ax) +
+        constraint.ny * (node.pos.y - constraint.ay)
+      );
+      max = Math.max(max, err);
+      sumSq += err * err;
+      count += 1;
+    }
+
+    return {
+      max,
+      l2: Math.sqrt(sumSq / Math.max(1, count))
+    };
+  };
+
+  const computeKineticEnergy = (): number => {
+    let total = 0;
+    for (const node of Object.values(state.scene.nodes)) {
+      if (node.anchored) {
+        continue;
+      }
+      ensureVelocityNode(node.id);
+      const v = velocities[node.id];
+      total += 0.5 * (v.x * v.x + v.y * v.y);
+    }
+    return total;
+  };
+
+  const computeAngularMomentumAboutAnchor = (): number => {
+    const anchors = Object.values(state.scene.nodes)
+      .filter((node) => node.anchored)
+      .sort((a, b) => a.id.localeCompare(b.id));
+    let reference: Vec2 = { x: 0, y: 0 };
+    if (anchors.length > 0) {
+      reference = { x: anchors[0].pos.x, y: anchors[0].pos.y };
+    } else {
+      const nodes = Object.values(state.scene.nodes);
+      if (nodes.length > 0) {
+        reference = {
+          x: nodes.reduce((sum, node) => sum + node.pos.x, 0) / nodes.length,
+          y: nodes.reduce((sum, node) => sum + node.pos.y, 0) / nodes.length
+        };
+      }
+    }
+
+    let angularMomentum = 0;
+    for (const node of Object.values(state.scene.nodes)) {
+      if (node.anchored) {
+        continue;
+      }
+      ensureVelocityNode(node.id);
+      const rX = node.pos.x - reference.x;
+      const rY = node.pos.y - reference.y;
+      angularMomentum += rX * velocities[node.id].y - rY * velocities[node.id].x;
+    }
+    return angularMomentum;
+  };
+
+  const computeRelativeJointAngle = (): number | null => {
+    const visibleSticks = Object.values(state.scene.sticks).filter((stick) => stick.visible !== false);
+    const sticksByNode: Record<string, string[]> = {};
+    for (const stick of visibleSticks) {
+      if (!sticksByNode[stick.a]) {
+        sticksByNode[stick.a] = [];
+      }
+      if (!sticksByNode[stick.b]) {
+        sticksByNode[stick.b] = [];
+      }
+      sticksByNode[stick.a].push(stick.id);
+      sticksByNode[stick.b].push(stick.id);
+    }
+
+    const jointNodeId = Object.keys(sticksByNode)
+      .sort()
+      .find((nodeId) => sticksByNode[nodeId].length >= 2);
+    if (!jointNodeId) {
+      return null;
+    }
+
+    const [firstStickId, secondStickId] = sticksByNode[jointNodeId]
+      .slice()
+      .sort((a, b) => a.localeCompare(b));
+    if (!firstStickId || !secondStickId) {
+      return null;
+    }
+    const firstStick = state.scene.sticks[firstStickId];
+    const secondStick = state.scene.sticks[secondStickId];
+    if (!firstStick || !secondStick) {
+      return null;
+    }
+
+    const firstOtherId = firstStick.a === jointNodeId ? firstStick.b : firstStick.a;
+    const secondOtherId = secondStick.a === jointNodeId ? secondStick.b : secondStick.a;
+    const joint = state.scene.nodes[jointNodeId];
+    const first = state.scene.nodes[firstOtherId];
+    const second = state.scene.nodes[secondOtherId];
+    if (!joint || !first || !second) {
+      return null;
+    }
+
+    const v1x = first.pos.x - joint.pos.x;
+    const v1y = first.pos.y - joint.pos.y;
+    const v2x = second.pos.x - joint.pos.x;
+    const v2y = second.pos.y - joint.pos.y;
+    const m1 = Math.hypot(v1x, v1y);
+    const m2 = Math.hypot(v2x, v2y);
+    if (m1 <= 1e-9 || m2 <= 1e-9) {
+      return null;
+    }
+
+    return Math.atan2(v1x * v2y - v1y * v2x, v1x * v2x + v1y * v2y);
+  };
+
+  const updatePhysicsDiagnostics = (
+    distanceConstraints: DistanceConstraint[],
+    lineConstraints: LineConstraintRef[]
+  ): void => {
+    const constraintViolation = evaluateConstraintViolation(distanceConstraints, lineConstraints);
+    const relativeJointAngle = computeRelativeJointAngle();
+    const previousHistory = state.physicsDiagnostics.relativeJointAngleHistory;
+    const nextHistory =
+      relativeJointAngle === null
+        ? []
+        : [...previousHistory, relativeJointAngle].slice(-PHYSICS_DIAGNOSTIC_HISTORY_MAX);
+
+    state.physicsDiagnostics = {
+      totalKineticEnergy: computeKineticEnergy(),
+      angularMomentumAboutAnchor: computeAngularMomentumAboutAnchor(),
+      constraintViolationL2: constraintViolation.l2,
+      constraintViolationMax: constraintViolation.max,
+      relativeJointAngle,
+      relativeJointAngleHistory: nextHistory
+    };
+  };
+
+  const clearConstraintLambdas = (): void => {
+    for (const map of [
+      positionDistanceLambdas,
+      positionLineLambdas,
+      velocityDistanceLambdas,
+      velocityLineLambdas
+    ]) {
+      for (const key of Object.keys(map)) {
+        delete map[key];
+      }
+    }
+  };
+
+  const pruneConstraintLambdas = (
+    distanceConstraints: DistanceConstraint[],
+    lineConstraints: LineConstraintRef[]
+  ): void => {
+    const activeDistanceKeys = new Set(distanceConstraints.map((constraint) => constraint.key));
+    const activeLineKeys = new Set(lineConstraints.map((constraint) => constraint.key));
+    for (const key of Object.keys(positionDistanceLambdas)) {
+      if (!activeDistanceKeys.has(key)) {
+        delete positionDistanceLambdas[key];
+      }
+    }
+    for (const key of Object.keys(velocityDistanceLambdas)) {
+      if (!activeDistanceKeys.has(key)) {
+        delete velocityDistanceLambdas[key];
+      }
+    }
+    for (const key of Object.keys(positionLineLambdas)) {
+      if (!activeLineKeys.has(key)) {
+        delete positionLineLambdas[key];
+      }
+    }
+    for (const key of Object.keys(velocityLineLambdas)) {
+      if (!activeLineKeys.has(key)) {
+        delete velocityLineLambdas[key];
+      }
+    }
+  };
+
+  const runRattleSymplecticSubstep = (dt: number): void => {
+    const distanceConstraints = gatherDistanceConstraints();
+    const lineConstraints = gatherLineConstraints();
+    pruneConstraintLambdas(distanceConstraints, lineConstraints);
+    const energyBeforeConstraints = computeKineticEnergy();
+
+    const predictedPositions: Record<string, Vec2> = {};
+    for (const node of Object.values(state.scene.nodes)) {
+      ensureVelocityNode(node.id);
+      if (node.anchored) {
+        velocities[node.id].x = 0;
+        velocities[node.id].y = 0;
+        continue;
+      }
+      node.pos.x += velocities[node.id].x * dt;
+      node.pos.y += velocities[node.id].y * dt;
+      predictedPositions[node.id] = { x: node.pos.x, y: node.pos.y };
+    }
+
+    applyWarmStartPosition(distanceConstraints, lineConstraints);
+    solvePositionConstraintsRattle(
+      distanceConstraints,
+      lineConstraints,
+      state.physicsOptions.constraintIterations,
+      state.physicsOptions.positionTolerance
+    );
+
+    // RATTLE: convert position-constraint correction into a consistent velocity impulse.
+    for (const node of Object.values(state.scene.nodes)) {
+      if (node.anchored) {
+        continue;
+      }
+      const predicted = predictedPositions[node.id];
+      if (!predicted) {
+        continue;
+      }
+      velocities[node.id].x += (node.pos.x - predicted.x) / dt;
+      velocities[node.id].y += (node.pos.y - predicted.y) / dt;
+    }
+
+    applyWarmStartVelocity(distanceConstraints, lineConstraints);
+    solveVelocityConstraintsRattle(
+      distanceConstraints,
+      lineConstraints,
+      state.physicsOptions.constraintIterations,
+      state.physicsOptions.velocityTolerance
+    );
+
+    for (const node of Object.values(state.scene.nodes)) {
+      if (!node.anchored) {
+        continue;
+      }
+      velocities[node.id].x = 0;
+      velocities[node.id].y = 0;
+      node.circleConstraintId = null;
+    }
+
+    // With no forces/friction, numerical constraint solves should not dissipate energy.
+    const energyAfterConstraints = computeKineticEnergy();
+    if (energyBeforeConstraints <= PHYSICS_ENERGY_EPSILON) {
+      for (const node of Object.values(state.scene.nodes)) {
+        if (node.anchored) {
+          continue;
+        }
+        velocities[node.id].x = 0;
+        velocities[node.id].y = 0;
+      }
+    } else if (energyAfterConstraints > PHYSICS_ENERGY_EPSILON) {
+      const scale = Math.sqrt(energyBeforeConstraints / energyAfterConstraints);
+      if (Number.isFinite(scale) && Math.abs(scale - 1) > 1e-12) {
+        for (const node of Object.values(state.scene.nodes)) {
+          if (node.anchored) {
+            continue;
+          }
+          velocities[node.id].x *= scale;
+          velocities[node.id].y *= scale;
+        }
+      }
+    }
+
+    updatePhysicsDiagnostics(distanceConstraints, lineConstraints);
+  };
+
+  const runLegacyProjectionSubstep = (dt: number): void => {
+    const nodeIds = Object.keys(state.scene.nodes);
+    const stickIds = Object.keys(state.scene.sticks);
+    const fixedNodeIds = new Set<string>(
+      nodeIds.filter((nodeId) => state.scene.nodes[nodeId].anchored)
+    );
+    const previousPositions: Record<string, Vec2> = {};
+    for (const nodeId of nodeIds) {
+      const node = state.scene.nodes[nodeId];
+      ensureVelocityNode(node.id);
+      previousPositions[node.id] = { x: node.pos.x, y: node.pos.y };
+      if (fixedNodeIds.has(nodeId)) {
+        velocities[node.id].x = 0;
+        velocities[node.id].y = 0;
+        continue;
+      }
+      node.pos.x += velocities[node.id].x * dt;
+      node.pos.y += velocities[node.id].y * dt;
+    }
+
+    enforceComponentConstraints(
+      state.scene,
+      nodeIds,
+      stickIds,
+      fixedNodeIds,
+      state.physicsOptions.constraintIterations
+    );
+
+    for (const nodeId of nodeIds) {
+      const node = state.scene.nodes[nodeId];
+      if (fixedNodeIds.has(nodeId)) {
+        velocities[node.id].x = 0;
+        velocities[node.id].y = 0;
+        continue;
+      }
+      const previous = previousPositions[node.id];
+      velocities[node.id].x = (node.pos.x - previous.x) / dt;
+      velocities[node.id].y = (node.pos.y - previous.y) / dt;
+    }
+
+    const distanceConstraints = gatherDistanceConstraints();
+    const lineConstraints = gatherLineConstraints();
+    updatePhysicsDiagnostics(distanceConstraints, lineConstraints);
+  };
+
   const pruneVelocities = (): void => {
     for (const nodeId of Object.keys(velocities)) {
       if (!state.scene.nodes[nodeId]) {
@@ -818,19 +1522,7 @@ export function createSceneStore(): SceneStore {
       velocities[nodeId].x = 0;
       velocities[nodeId].y = 0;
     }
-  };
-
-  const computeKineticEnergy = (): number => {
-    let total = 0;
-    for (const node of Object.values(state.scene.nodes)) {
-      if (node.anchored) {
-        continue;
-      }
-      ensureVelocityNode(node.id);
-      const v = velocities[node.id];
-      total += 0.5 * (v.x * v.x + v.y * v.y);
-    }
-    return total;
+    clearConstraintLambdas();
   };
 
   const isEditLocked = (): boolean => state.physics.enabled;
@@ -920,7 +1612,7 @@ export function createSceneStore(): SceneStore {
       color,
       enabled: existing?.enabled ?? true
     };
-    setPivotSelection(state, nodeId);
+    setPenSelection(state, nodeId);
     emit();
     return { ok: true };
   };
@@ -987,6 +1679,20 @@ export function createSceneStore(): SceneStore {
       clearLineResize(state);
     }
 
+    emit();
+    return { ok: true };
+  };
+
+  const deletePenByNodeId = (nodeId: string): Result => {
+    if (isEditLocked()) {
+      return { ok: false, reason: 'Pen editing is disabled while physics is enabled.' };
+    }
+
+    if (!state.pens[nodeId]) {
+      return { ok: false, reason: 'Pen does not exist.' };
+    }
+
+    removePenForNode(nodeId);
     emit();
     return { ok: true };
   };
@@ -1482,7 +2188,7 @@ export function createSceneStore(): SceneStore {
 
     clearSelectionForTool(): void {
       if (state.tool === 'anchor') {
-        if (state.selection.anchorNodeId || state.selection.pivotNodeId) {
+        if (state.selection.anchorNodeId || state.selection.penNodeId || state.selection.pivotNodeId) {
           clearAllSelections(state);
           emit();
         }
@@ -1490,7 +2196,10 @@ export function createSceneStore(): SceneStore {
       }
       if (state.tool === 'stick') {
         const hadSelection =
-          state.selection.stickId || state.selection.anchorNodeId || state.selection.pivotNodeId;
+          state.selection.stickId ||
+          state.selection.anchorNodeId ||
+          state.selection.penNodeId ||
+          state.selection.pivotNodeId;
         clearAllSelections(state);
         clearStickResize(state);
         if (hadSelection) {
@@ -1502,6 +2211,7 @@ export function createSceneStore(): SceneStore {
         const hadSelection =
           state.selection.lineId ||
           state.selection.anchorNodeId ||
+          state.selection.penNodeId ||
           state.selection.pivotNodeId ||
           state.selection.stickId ||
           state.selection.circleId ||
@@ -1518,6 +2228,7 @@ export function createSceneStore(): SceneStore {
       if (state.tool === 'pen') {
         const hadSelection =
           state.selection.anchorNodeId ||
+          state.selection.penNodeId ||
           state.selection.pivotNodeId ||
           state.selection.stickId ||
           state.selection.lineId ||
@@ -1538,6 +2249,7 @@ export function createSceneStore(): SceneStore {
         const hadSelection =
           state.selection.circleId ||
           state.selection.anchorNodeId ||
+          state.selection.penNodeId ||
           state.selection.pivotNodeId ||
           state.selection.stickId ||
           state.selection.lineId ||
@@ -1555,6 +2267,19 @@ export function createSceneStore(): SceneStore {
     selectAt(point) {
       if (isEditLocked()) {
         return null;
+      }
+
+      const penNodeId = hitTestPenAtPoint(point, PEN_HIT_RADIUS);
+      if (penNodeId) {
+        const node = state.scene.nodes[penNodeId];
+        if (node && !node.anchored) {
+          setPenSelection(state, penNodeId);
+          clearStickResize(state);
+          clearLineResize(state);
+          clearCircleResize(state);
+          emit();
+          return { kind: 'pen', id: penNodeId } as const;
+        }
       }
 
       const pivotId = hitTestPivot(state.scene.nodes, point, PIVOT_HIT_RADIUS);
@@ -1599,6 +2324,7 @@ export function createSceneStore(): SceneStore {
 
       const hadSelection =
         state.selection.anchorNodeId ||
+        state.selection.penNodeId ||
         state.selection.pivotNodeId ||
         state.selection.stickId ||
         state.selection.lineId ||
@@ -1619,6 +2345,7 @@ export function createSceneStore(): SceneStore {
     clearSelection(): void {
       const hadSelection =
         state.selection.anchorNodeId ||
+        state.selection.penNodeId ||
         state.selection.pivotNodeId ||
         state.selection.stickId ||
         state.selection.lineId ||
@@ -1641,7 +2368,7 @@ export function createSceneStore(): SceneStore {
       }
       const nodeId = hitTestPivot(state.scene.nodes, point, PIVOT_HIT_RADIUS);
       if (!nodeId) {
-        if (state.selection.anchorNodeId || state.selection.pivotNodeId) {
+        if (state.selection.anchorNodeId || state.selection.penNodeId || state.selection.pivotNodeId) {
           clearAllSelections(state);
           emit();
         }
@@ -1671,7 +2398,13 @@ export function createSceneStore(): SceneStore {
         return { ok: true };
       }
 
-      if (state.selection.stickId || state.selection.anchorNodeId || state.selection.pivotNodeId || state.stickResize.active) {
+      if (
+        state.selection.stickId ||
+        state.selection.anchorNodeId ||
+        state.selection.penNodeId ||
+        state.selection.pivotNodeId ||
+        state.stickResize.active
+      ) {
         clearAllSelections(state);
         clearStickResize(state);
         emit();
@@ -1830,7 +2563,15 @@ export function createSceneStore(): SceneStore {
       }
       const lineId = hitTestLine(state.scene, point, LINE_HIT_RADIUS);
       if (!lineId) {
-        if (state.selection.lineId || state.selection.anchorNodeId || state.selection.pivotNodeId || state.selection.stickId || state.selection.circleId || state.lineResize.active) {
+        if (
+          state.selection.lineId ||
+          state.selection.anchorNodeId ||
+          state.selection.penNodeId ||
+          state.selection.pivotNodeId ||
+          state.selection.stickId ||
+          state.selection.circleId ||
+          state.lineResize.active
+        ) {
           clearAllSelections(state);
           clearLineResize(state);
           emit();
@@ -1918,6 +2659,7 @@ export function createSceneStore(): SceneStore {
       if (!nodeId) {
         const hadSelection =
           state.selection.anchorNodeId ||
+          state.selection.penNodeId ||
           state.selection.pivotNodeId ||
           state.selection.stickId ||
           state.selection.lineId ||
@@ -1974,6 +2716,14 @@ export function createSceneStore(): SceneStore {
       }
       emit();
       return { ok: true };
+    },
+
+    deleteSelectedPen(): Result {
+      const penNodeId = state.selection.penNodeId;
+      if (!penNodeId) {
+        return { ok: false, reason: 'No selected pen.' };
+      }
+      return deletePenByNodeId(penNodeId);
     },
 
     beginCircle(center): Result {
@@ -2034,7 +2784,15 @@ export function createSceneStore(): SceneStore {
       }
       const circleId = hitTestCircle(state.scene, point, CIRCLE_HIT_RADIUS);
       if (!circleId) {
-        if (state.selection.circleId || state.selection.anchorNodeId || state.selection.pivotNodeId || state.selection.stickId || state.selection.lineId || state.circleResize.active) {
+        if (
+          state.selection.circleId ||
+          state.selection.anchorNodeId ||
+          state.selection.penNodeId ||
+          state.selection.pivotNodeId ||
+          state.selection.stickId ||
+          state.selection.lineId ||
+          state.circleResize.active
+        ) {
           clearAllSelections(state);
           clearCircleResize(state);
           emit();
@@ -2203,6 +2961,68 @@ export function createSceneStore(): SceneStore {
       emit();
     },
 
+    setPhysicsOptions(opts): void {
+      const nextOptions: PhysicsOptions = { ...state.physicsOptions };
+      let shouldClearLambdas = false;
+
+      if (typeof opts.substeps === 'number') {
+        nextOptions.substeps = clampInteger(opts.substeps, 1, PHYSICS_MAX_SUBSTEPS);
+      }
+      if (typeof opts.constraintIterations === 'number') {
+        nextOptions.constraintIterations = clampInteger(
+          opts.constraintIterations,
+          1,
+          PHYSICS_MAX_CONSTRAINT_ITERATIONS
+        );
+      }
+      if (typeof opts.positionTolerance === 'number') {
+        nextOptions.positionTolerance = clampPositive(
+          opts.positionTolerance,
+          state.physicsOptions.positionTolerance
+        );
+      }
+      if (typeof opts.velocityTolerance === 'number') {
+        nextOptions.velocityTolerance = clampPositive(
+          opts.velocityTolerance,
+          state.physicsOptions.velocityTolerance
+        );
+      }
+      if (
+        opts.integratorMode === 'legacy_projection' ||
+        opts.integratorMode === 'rattle_symplectic'
+      ) {
+        shouldClearLambdas ||= nextOptions.integratorMode !== opts.integratorMode;
+        nextOptions.integratorMode = opts.integratorMode;
+      }
+      if (opts.massModel === 'node_mass' || opts.massModel === 'rigid_stick') {
+        nextOptions.massModel = opts.massModel;
+      }
+
+      const changed =
+        nextOptions.substeps !== state.physicsOptions.substeps ||
+        nextOptions.constraintIterations !== state.physicsOptions.constraintIterations ||
+        nextOptions.positionTolerance !== state.physicsOptions.positionTolerance ||
+        nextOptions.velocityTolerance !== state.physicsOptions.velocityTolerance ||
+        nextOptions.integratorMode !== state.physicsOptions.integratorMode ||
+        nextOptions.massModel !== state.physicsOptions.massModel;
+      if (!changed) {
+        return;
+      }
+
+      state.physicsOptions = nextOptions;
+      if (shouldClearLambdas) {
+        clearConstraintLambdas();
+      }
+      emit();
+    },
+
+    getPhysicsDiagnostics(): PhysicsDiagnostics {
+      return {
+        ...state.physicsDiagnostics,
+        relativeJointAngleHistory: [...state.physicsDiagnostics.relativeJointAngleHistory]
+      };
+    },
+
     stepPhysics(dtSeconds): Result {
       if (!state.physics.enabled) {
         return { ok: false, reason: 'Physics is disabled.' };
@@ -2219,73 +3039,19 @@ export function createSceneStore(): SceneStore {
         ensureVelocityNode(nodeId);
       }
 
+      const substeps = clampInteger(state.physicsOptions.substeps, 1, PHYSICS_MAX_SUBSTEPS);
+      const integratorMode = state.physicsOptions.integratorMode;
       let remaining = Math.min(dtSeconds, 0.05);
-      while (remaining > 0) {
-        const stepDt = Math.min(remaining, PHYSICS_MAX_STEP_SECONDS);
-        remaining -= stepDt;
+      while (remaining > 1e-12) {
+        const frameStep = Math.min(remaining, PHYSICS_MAX_STEP_SECONDS);
+        remaining -= frameStep;
+        const substepDt = frameStep / substeps;
 
-        const nodeIds = Object.keys(state.scene.nodes);
-        const stickIds = Object.keys(state.scene.sticks);
-        const fixedNodeIds = new Set<string>(
-          nodeIds.filter((nodeId) => state.scene.nodes[nodeId].anchored)
-        );
-
-        const previousPositions: Record<string, Vec2> = {};
-        for (const nodeId of nodeIds) {
-          const node = state.scene.nodes[nodeId];
-          previousPositions[node.id] = { x: node.pos.x, y: node.pos.y };
-        }
-
-        for (const nodeId of nodeIds) {
-          const node = state.scene.nodes[nodeId];
-          if (fixedNodeIds.has(nodeId)) {
-            velocities[node.id].x = 0;
-            velocities[node.id].y = 0;
-            continue;
-          }
-          node.pos.x += velocities[node.id].x * stepDt;
-          node.pos.y += velocities[node.id].y * stepDt;
-        }
-
-        const energyBeforeProjection = computeKineticEnergy();
-        enforceComponentConstraints(
-          state.scene,
-          nodeIds,
-          stickIds,
-          fixedNodeIds,
-          PHYSICS_CONSTRAINT_ITERATIONS
-        );
-
-        for (const nodeId of nodeIds) {
-          const node = state.scene.nodes[nodeId];
-          if (fixedNodeIds.has(nodeId)) {
-            velocities[node.id].x = 0;
-            velocities[node.id].y = 0;
-            continue;
-          }
-
-          const previous = previousPositions[node.id];
-          velocities[node.id].x = (node.pos.x - previous.x) / stepDt;
-          velocities[node.id].y = (node.pos.y - previous.y) / stepDt;
-        }
-
-        const energyAfterProjection = computeKineticEnergy();
-        if (energyBeforeProjection <= PHYSICS_ENERGY_EPSILON) {
-          for (const node of Object.values(state.scene.nodes)) {
-            if (node.anchored) {
-              continue;
-            }
-            velocities[node.id].x = 0;
-            velocities[node.id].y = 0;
-          }
-        } else if (energyAfterProjection > PHYSICS_ENERGY_EPSILON) {
-          const scale = Math.sqrt(energyBeforeProjection / energyAfterProjection);
-          for (const node of Object.values(state.scene.nodes)) {
-            if (node.anchored) {
-              continue;
-            }
-            velocities[node.id].x *= scale;
-            velocities[node.id].y *= scale;
+        for (let i = 0; i < substeps; i += 1) {
+          if (integratorMode === 'legacy_projection') {
+            runLegacyProjectionSubstep(substepDt);
+          } else {
+            runRattleSymplecticSubstep(substepDt);
           }
         }
       }

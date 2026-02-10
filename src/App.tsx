@@ -60,6 +60,12 @@ export default function App({ store }: AppProps): JSX.Element {
         return;
       }
 
+      if (state.selection.penNodeId) {
+        event.preventDefault();
+        sceneStore.deleteSelectedPen();
+        return;
+      }
+
       if (state.selection.pivotNodeId) {
         event.preventDefault();
         sceneStore.deleteSelectedPivot();
@@ -87,6 +93,7 @@ export default function App({ store }: AppProps): JSX.Element {
     sceneStore,
     state.physics.enabled,
     state.selection.anchorNodeId,
+    state.selection.penNodeId,
     state.selection.pivotNodeId,
     state.selection.lineId,
     state.selection.stickId
@@ -256,6 +263,9 @@ export default function App({ store }: AppProps): JSX.Element {
       </pre>
       <pre data-testid="pen-debug" className="scene-debug">
         {JSON.stringify({ pens: state.pens, penTrails: state.penTrails })}
+      </pre>
+      <pre data-testid="physics-debug" className="scene-debug">
+        {JSON.stringify(state.physicsDiagnostics)}
       </pre>
     </div>
   );

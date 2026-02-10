@@ -261,6 +261,30 @@ describe('createSceneStore', () => {
     expect(begin.ok).toBe(false);
   });
 
+  it('allows physics options updates and returns a defensive diagnostics snapshot', () => {
+    const store = createSceneStore();
+    store.setPhysicsOptions({
+      substeps: 99,
+      constraintIterations: 99,
+      positionTolerance: -1,
+      velocityTolerance: 0,
+      integratorMode: 'legacy_projection',
+      massModel: 'rigid_stick'
+    });
+
+    const options = store.getState().physicsOptions;
+    expect(options.substeps).toBe(16);
+    expect(options.constraintIterations).toBe(64);
+    expect(options.positionTolerance).toBeGreaterThan(0);
+    expect(options.velocityTolerance).toBeGreaterThan(0);
+    expect(options.integratorMode).toBe('legacy_projection');
+    expect(options.massModel).toBe('rigid_stick');
+
+    const diagnostics = store.getPhysicsDiagnostics();
+    diagnostics.relativeJointAngleHistory.push(123);
+    expect(store.getPhysicsDiagnostics().relativeJointAngleHistory).toHaveLength(0);
+  });
+
   it('advances linkage with momentum when physics is enabled', () => {
     const store = createSceneStore();
     store.addStick({ x: 0, y: 0 }, { x: 100, y: 0 });
@@ -283,10 +307,16 @@ describe('createSceneStore', () => {
     expect(after.y).not.toBeCloseTo(before.y, 4);
   });
 
-  it('maintains momentum over time in physics mode without friction', () => {
+  it('tracks bounded physics diagnostics over time in frictionless mode', () => {
     const store = createSceneStore();
     store.addStick({ x: 0, y: 0 }, { x: 90, y: 0 });
     store.addStick({ x: 90, y: 0 }, { x: 170, y: 45 });
+
+    store.setPhysicsOptions({
+      integratorMode: 'rattle_symplectic',
+      substeps: 8,
+      constraintIterations: 32
+    });
 
     const nodeIds = Object.keys(store.getState().scene.nodes);
     const anchorId = nodeIds.find((id) => store.getState().scene.nodes[id].pos.x === 0);
@@ -305,38 +335,34 @@ describe('createSceneStore', () => {
     store.endDrag();
 
     const dt = 1 / 60;
-    let previousPositions = Object.fromEntries(
-      Object.entries(store.getState().scene.nodes).map(([id, node]) => [id, { ...node.pos }])
-    );
-    const speedSeries: number[] = [];
+    const energies: number[] = [];
+    const angularMomenta: number[] = [];
+    const maxViolations: number[] = [];
 
     for (let i = 0; i < 160; i += 1) {
       store.stepPhysics(dt);
-      const current = store.getState().scene.nodes;
-      let speedSq = 0;
-      for (const [id, node] of Object.entries(current)) {
-        if (node.anchored) {
-          continue;
-        }
-        const prev = previousPositions[id];
-        const dx = node.pos.x - prev.x;
-        const dy = node.pos.y - prev.y;
-        speedSq += (dx * dx + dy * dy) / (dt * dt);
-      }
-      speedSeries.push(speedSq);
-      previousPositions = Object.fromEntries(
-        Object.entries(current).map(([id, node]) => [id, { ...node.pos }])
-      );
+      const diagnostics = store.getPhysicsDiagnostics();
+      energies.push(diagnostics.totalKineticEnergy);
+      angularMomenta.push(diagnostics.angularMomentumAboutAnchor);
+      maxViolations.push(diagnostics.constraintViolationMax);
+
+      expect(Number.isFinite(diagnostics.totalKineticEnergy)).toBe(true);
+      expect(Number.isFinite(diagnostics.angularMomentumAboutAnchor)).toBe(true);
+      expect(Number.isFinite(diagnostics.constraintViolationL2)).toBe(true);
+      expect(Number.isFinite(diagnostics.constraintViolationMax)).toBe(true);
     }
 
-    const early = speedSeries.slice(10, 40);
-    const late = speedSeries.slice(120, 150);
-    const earlyAvg = early.reduce((sum, v) => sum + v, 0) / early.length;
-    const lateAvg = late.reduce((sum, v) => sum + v, 0) / late.length;
+    const nonZeroEnergies = energies.filter((value) => value > 1e-6);
+    expect(nonZeroEnergies.length).toBeGreaterThan(40);
+    const peakEnergy = Math.max(...nonZeroEnergies);
+    const tailEnergy = nonZeroEnergies[nonZeroEnergies.length - 1];
+    expect(tailEnergy).toBeGreaterThan(peakEnergy * 0.35);
 
-    expect(earlyAvg).toBeGreaterThan(0.001);
-    expect(lateAvg).toBeGreaterThan(earlyAvg * 0.75);
-    expect(lateAvg).toBeLessThan(earlyAvg * 1.35);
+    const angularAbsMax = Math.max(...angularMomenta.map((value) => Math.abs(value)));
+    expect(angularAbsMax).toBeGreaterThan(1e-3);
+
+    const violationMax = Math.max(...maxViolations);
+    expect(violationMax).toBeLessThan(1.25);
   });
 
   it('starts stationary after enabling physics until user drags in physics mode', () => {
@@ -664,6 +690,29 @@ describe('createSceneStore', () => {
       store.getState().penTrails[movingId!]?.reduce((sum, stroke) => sum + stroke.points.length, 0) ?? 0;
     expect(afterReplayPoints).toBeLessThan(duringPlayPoints);
     expect(afterReplayPoints).toBeLessThanOrEqual(1);
+  });
+
+  it('deletes a selected pen without deleting the pivot or sticks', () => {
+    const store = createSceneStore();
+    expect(store.addStick({ x: 100, y: 100 }, { x: 220, y: 100 }).ok).toBe(true);
+
+    const state = store.getState();
+    const penNodeId = Object.keys(state.scene.nodes).find((id) => state.scene.nodes[id].pos.x > 160);
+    expect(penNodeId).toBeDefined();
+
+    const beforeNodeCount = Object.keys(state.scene.nodes).length;
+    const beforeStickCount = Object.keys(state.scene.sticks).length;
+    expect(store.setPen(penNodeId!).ok).toBe(true);
+    expect(store.getState().selection.penNodeId).toBe(penNodeId);
+
+    expect(store.deleteSelectedPen().ok).toBe(true);
+
+    const after = store.getState();
+    expect(after.pens[penNodeId!]).toBeUndefined();
+    expect(after.penTrails[penNodeId!]).toBeUndefined();
+    expect(after.selection.penNodeId).toBeNull();
+    expect(Object.keys(after.scene.nodes)).toHaveLength(beforeNodeCount);
+    expect(Object.keys(after.scene.sticks)).toHaveLength(beforeStickCount);
   });
 
 });

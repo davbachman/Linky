@@ -22,10 +22,14 @@ export const ANCHOR_RADIUS = 8;
 const STICK_AURA_COLOR = 'rgba(30, 144, 255, 0.35)';
 const ANCHOR_AURA_COLOR = 'rgba(255, 80, 80, 0.45)';
 const PIVOT_AURA_COLOR = 'rgba(30, 144, 255, 0.45)';
+const PEN_AURA_COLOR = 'rgba(123, 63, 228, 0.45)';
 const LINE_COLOR = '#2b6ce6';
 const LINE_AURA_COLOR = 'rgba(43, 108, 230, 0.35)';
 const PEN_DISABLED_COLOR = 'rgba(90, 90, 90, 0.75)';
-const PEN_X_SIZE = 5;
+const PEN_X_SIZE = 6;
+const PEN_X_OUTLINE_COLOR = 'rgba(255, 255, 255, 0.9)';
+const PEN_X_OUTLINE_WIDTH = 5;
+const PEN_X_WIDTH = 3;
 
 export type CameraView = {
   zoom: number;
@@ -212,19 +216,40 @@ export function renderScene(
     }
   }
 
+  if (selection.penNodeId) {
+    const selectedPenNode = scene.nodes[selection.penNodeId];
+    if (selectedPenNode && !selectedPenNode.anchored && pens[selection.penNodeId]) {
+      ctx.beginPath();
+      ctx.arc(selectedPenNode.pos.x, selectedPenNode.pos.y, PIVOT_RADIUS + 7, 0, Math.PI * 2);
+      ctx.strokeStyle = PEN_AURA_COLOR;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+  }
+
   for (const pen of Object.values(pens)) {
     const node = scene.nodes[pen.nodeId];
     if (!node || node.anchored) {
       continue;
     }
     const color = pen.enabled ? pen.color : PEN_DISABLED_COLOR;
+
+    ctx.beginPath();
+    ctx.moveTo(node.pos.x - PEN_X_SIZE, node.pos.y - PEN_X_SIZE);
+    ctx.lineTo(node.pos.x + PEN_X_SIZE, node.pos.y + PEN_X_SIZE);
+    ctx.moveTo(node.pos.x - PEN_X_SIZE, node.pos.y + PEN_X_SIZE);
+    ctx.lineTo(node.pos.x + PEN_X_SIZE, node.pos.y - PEN_X_SIZE);
+    ctx.strokeStyle = PEN_X_OUTLINE_COLOR;
+    ctx.lineWidth = PEN_X_OUTLINE_WIDTH;
+    ctx.stroke();
+
     ctx.beginPath();
     ctx.moveTo(node.pos.x - PEN_X_SIZE, node.pos.y - PEN_X_SIZE);
     ctx.lineTo(node.pos.x + PEN_X_SIZE, node.pos.y + PEN_X_SIZE);
     ctx.moveTo(node.pos.x - PEN_X_SIZE, node.pos.y + PEN_X_SIZE);
     ctx.lineTo(node.pos.x + PEN_X_SIZE, node.pos.y - PEN_X_SIZE);
     ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = PEN_X_WIDTH;
     ctx.stroke();
   }
 

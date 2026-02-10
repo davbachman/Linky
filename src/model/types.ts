@@ -60,6 +60,7 @@ export type DragState = {
 
 export type SelectionState = {
   anchorNodeId: string | null;
+  penNodeId: string | null;
   pivotNodeId: string | null;
   stickId: string | null;
   lineId: string | null;
@@ -68,6 +69,7 @@ export type SelectionState = {
 
 export type SelectionHit =
   | { kind: 'anchor'; id: string }
+  | { kind: 'pen'; id: string }
   | { kind: 'pivot'; id: string }
   | { kind: 'stick'; id: string }
   | { kind: 'line'; id: string }
@@ -112,6 +114,28 @@ export type SolverOptions = {
   tolerancePx: number;
 };
 
+export type PhysicsIntegratorMode = 'legacy_projection' | 'rattle_symplectic';
+
+export type MassModel = 'node_mass' | 'rigid_stick';
+
+export type PhysicsOptions = {
+  substeps: number;
+  constraintIterations: number;
+  positionTolerance: number;
+  velocityTolerance: number;
+  integratorMode: PhysicsIntegratorMode;
+  massModel: MassModel;
+};
+
+export type PhysicsDiagnostics = {
+  totalKineticEnergy: number;
+  angularMomentumAboutAnchor: number;
+  constraintViolationL2: number;
+  constraintViolationMax: number;
+  relativeJointAngle: number | null;
+  relativeJointAngleHistory: number[];
+};
+
 export type PhysicsState = {
   enabled: boolean;
 };
@@ -135,6 +159,8 @@ export type SceneStoreState = {
   lineResize: LineResizeState;
   circleResize: CircleResizeState;
   solverOptions: SolverOptions;
+  physicsOptions: PhysicsOptions;
+  physicsDiagnostics: PhysicsDiagnostics;
   physics: PhysicsState;
 };
 
@@ -171,6 +197,7 @@ export interface SceneStore {
   hitTestPen(point: Vec2): string | null;
   setPenColor(nodeId: string, color: string): Result;
   setPenEnabled(nodeId: string, enabled: boolean): Result;
+  deleteSelectedPen(): Result;
   beginCircle(center: Vec2): Result;
   updateCirclePreview(pointer: Vec2): Result;
   endCircle(edgePoint: Vec2): Result;
@@ -183,6 +210,8 @@ export interface SceneStore {
   deleteSelectedAnchor(): Result;
   deleteSelectedStick(): Result;
   setPhysicsEnabled(enabled: boolean): void;
+  setPhysicsOptions(opts: Partial<PhysicsOptions>): void;
+  getPhysicsDiagnostics(): PhysicsDiagnostics;
   stepPhysics(dtSeconds: number): Result;
   tryAnchorAt(point: Vec2): Result;
   tryBeginDragAt(point: Vec2): Result;

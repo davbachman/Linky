@@ -262,7 +262,10 @@ export function LinkageCanvas({
 
       const selectionHit = store.selectAt(point);
       if (selectionHit) {
-        if (tool === 'stick' && (selectionHit.kind === 'pivot' || selectionHit.kind === 'anchor')) {
+        if (
+          tool === 'stick' &&
+          (selectionHit.kind === 'pivot' || selectionHit.kind === 'pen' || selectionHit.kind === 'anchor')
+        ) {
           const beginStick = store.beginStick(point);
           if (beginStick.ok) {
             activePointerIdRef.current = event.pointerId;
@@ -272,17 +275,20 @@ export function LinkageCanvas({
           return;
         }
 
-        if (tool === 'anchor' && selectionHit.kind === 'pivot') {
+        if (tool === 'anchor' && (selectionHit.kind === 'pivot' || selectionHit.kind === 'pen')) {
           store.setAnchor(selectionHit.id);
           return;
         }
 
-        if (tool === 'pen' && selectionHit.kind === 'pivot') {
+        if (tool === 'pen' && (selectionHit.kind === 'pivot' || selectionHit.kind === 'pen')) {
           store.setPen(selectionHit.id);
           return;
         }
 
-        if (tool === 'idle' && (selectionHit.kind === 'pivot' || selectionHit.kind === 'anchor')) {
+        if (
+          tool === 'idle' &&
+          (selectionHit.kind === 'pivot' || selectionHit.kind === 'pen' || selectionHit.kind === 'anchor')
+        ) {
           const dragStart = store.beginDrag(selectionHit.id);
           if (dragStart.ok) {
             activePointerIdRef.current = event.pointerId;

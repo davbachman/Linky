@@ -553,6 +553,26 @@ describe('App integration', () => {
     expect(Object.values(parsePenDebug().pens)[0].enabled).toBe(false);
   });
 
+  it('deletes a selected pen without deleting the pivot or stick', () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId('tool-stick'));
+    drawStick(120, 140, 250, 140, 1);
+    expect(screen.getByTestId('node-count')).toHaveTextContent('2');
+    expect(screen.getByTestId('stick-count')).toHaveTextContent('1');
+
+    fireEvent.click(screen.getByTestId('tool-pen'));
+    const target = canvas();
+    fireEvent.pointerDown(target, { clientX: 250, clientY: 140, pointerId: 2 });
+    expect(Object.keys(parsePenDebug().pens)).toHaveLength(1);
+
+    pressDelete();
+
+    expect(Object.keys(parsePenDebug().pens)).toHaveLength(0);
+    expect(screen.getByTestId('node-count')).toHaveTextContent('2');
+    expect(screen.getByTestId('stick-count')).toHaveTextContent('1');
+  });
+
   it('pans the viewport with space-drag and keeps interaction points in world space', () => {
     render(<App />);
 
