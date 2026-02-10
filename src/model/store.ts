@@ -2194,7 +2194,7 @@ export function createSceneStore(): SceneStore {
       return applyBeginDragById(nodeId);
     },
 
-    updateDrag(pointer): Result {
+    updateDrag(pointer, options = {}): Result {
       const activeNodeId = state.drag.activeNodeId;
       if (!activeNodeId) {
         return { ok: false, reason: 'No active drag.' };
@@ -2205,6 +2205,7 @@ export function createSceneStore(): SceneStore {
         return { ok: false, reason: 'Active node does not exist.' };
       }
 
+      const disableSnap = options.disableSnap ?? false;
       const rawPointer = { x: pointer.x, y: pointer.y };
       const previousRawPointer = state.drag.rawPointer ?? { x: rawPointer.x, y: rawPointer.y };
       let constrainedPointer = { x: rawPointer.x, y: rawPointer.y };
@@ -2222,7 +2223,7 @@ export function createSceneStore(): SceneStore {
       }
 
       activeNode.circleConstraintId = null;
-      if (!activeNode.attachmentId && !activeNode.lineConstraintId) {
+      if (!disableSnap && !activeNode.attachmentId && !activeNode.lineConstraintId) {
         const snapLineId = hitTestLine(state.scene, constrainedPointer, LINE_SNAP_RADIUS);
         if (snapLineId) {
           const line = state.scene.lines[snapLineId];
@@ -2420,7 +2421,7 @@ export function createSceneStore(): SceneStore {
       return { ok: true };
     },
 
-    endStick(end): Result {
+    endStick(end, options = {}): Result {
       if (isEditLocked()) {
         return { ok: false, reason: 'Stick editing is disabled while physics is enabled.' };
       }
@@ -2429,7 +2430,8 @@ export function createSceneStore(): SceneStore {
         return { ok: false, reason: 'No active stick creation.' };
       }
 
-      const snappedEndNodeId = hitTestPivot(state.scene.nodes, end, SNAP_RADIUS);
+      const disableSnap = options.disableSnap ?? false;
+      const snappedEndNodeId = disableSnap ? null : hitTestPivot(state.scene.nodes, end, SNAP_RADIUS);
       let endNodeId: string;
       let endCreated = false;
       let endPendingInteriorSplit = false;
@@ -2437,7 +2439,7 @@ export function createSceneStore(): SceneStore {
       if (snappedEndNodeId) {
         endNodeId = snappedEndNodeId;
       } else {
-        const interiorHit = findInteriorStickHit(state.scene, end, SNAP_RADIUS);
+        const interiorHit = disableSnap ? null : findInteriorStickHit(state.scene, end, SNAP_RADIUS);
         if (interiorHit) {
           endNodeId = createNodeAt(interiorHit.projected);
           endCreated = true;
@@ -2448,7 +2450,7 @@ export function createSceneStore(): SceneStore {
         }
       }
 
-      if (!endPendingInteriorSplit) {
+      if (!disableSnap && !endPendingInteriorSplit) {
         bindNodeToNearbyLine(endNodeId);
       }
 
@@ -2816,7 +2818,7 @@ export function createSceneStore(): SceneStore {
       return { ok: true };
     },
 
-    endSelectedStickResize(): Result {
+    endSelectedStickResize(options = {}): Result {
       if (isEditLocked()) {
         return { ok: false, reason: 'Stick editing is disabled while physics is enabled.' };
       }
@@ -2824,10 +2826,11 @@ export function createSceneStore(): SceneStore {
         return { ok: false, reason: 'No active stick resize.' };
       }
 
+      const disableSnap = options.disableSnap ?? false;
       const stickId = state.stickResize.stickId;
       const movingNodeId = state.stickResize.movingNodeId;
       const fixedNodeId = state.stickResize.fixedNodeId;
-      if (stickId && movingNodeId && fixedNodeId) {
+      if (!disableSnap && stickId && movingNodeId && fixedNodeId) {
         const movingNode = state.scene.nodes[movingNodeId];
         const fixedNode = state.scene.nodes[fixedNodeId];
         const stick = state.scene.sticks[stickId];

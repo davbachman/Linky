@@ -418,7 +418,7 @@ export function LinkageCanvas({
       } else if (activeInteractionRef.current === 'resize-line') {
         store.updateSelectedLineResize(point);
       } else if (activeInteractionRef.current === 'drag') {
-        store.updateDrag(point);
+        store.updateDrag(point, { disableSnap: event.shiftKey });
       }
     },
     [store]
@@ -439,9 +439,9 @@ export function LinkageCanvas({
         const point = screenToWorld(screenPoint, cameraRef.current);
 
         if (activeInteractionRef.current === 'stick') {
-          store.endStick(point);
+          store.endStick(point, { disableSnap: event.shiftKey });
         } else if (activeInteractionRef.current === 'resize-stick') {
-          store.endSelectedStickResize();
+          store.endSelectedStickResize({ disableSnap: event.shiftKey });
         } else if (activeInteractionRef.current === 'line') {
           store.endLine(point);
         } else if (activeInteractionRef.current === 'resize-line') {

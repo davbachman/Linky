@@ -157,6 +157,10 @@ export type Result = {
   reason?: string;
 };
 
+export type DragUpdateOptions = {
+  disableSnap?: boolean;
+};
+
 export type SceneStoreState = {
   scene: Scene;
   pens: Record<string, Pen>;
@@ -183,11 +187,11 @@ export interface SceneStore {
   addStick(start: Vec2, end: Vec2): Result;
   setAnchor(nodeId: string): Result;
   beginDrag(nodeId: string): Result;
-  updateDrag(pointer: Vec2): Result;
+  updateDrag(pointer: Vec2, options?: DragUpdateOptions): Result;
   endDrag(): Result;
   beginStick(start: Vec2): Result;
   updateStickPreview(pointer: Vec2): Result;
-  endStick(end: Vec2): Result;
+  endStick(end: Vec2, options?: DragUpdateOptions): Result;
   clearSelectionForTool(): void;
   selectAt(point: Vec2): SelectionHit | null;
   clearSelection(): void;
@@ -195,7 +199,7 @@ export interface SceneStore {
   tryHandleStickToolClick(point: Vec2): Result;
   tryBeginSelectedStickResizeAt(point: Vec2): Result;
   updateSelectedStickResize(pointer: Vec2): Result;
-  endSelectedStickResize(): Result;
+  endSelectedStickResize(options?: DragUpdateOptions): Result;
   beginLine(start: Vec2): Result;
   updateLinePreview(pointer: Vec2): Result;
   endLine(end: Vec2): Result;

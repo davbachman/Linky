@@ -560,6 +560,25 @@ describe('createSceneStore', () => {
     expect(afterSecondDrag.pos.x).toBeCloseTo(150, 3);
   });
 
+  it('does not snap to a nearby line when snap is disabled during drag', () => {
+    const store = createSceneStore();
+    store.addStick({ x: 100, y: 120 }, { x: 200, y: 120 });
+
+    expect(store.beginLine({ x: 150, y: 40 }).ok).toBe(true);
+    expect(store.endLine({ x: 150, y: 220 }).ok).toBe(true);
+
+    const movingId = Object.values(store.getState().scene.nodes).find((node) => node.pos.x > 150)?.id;
+    expect(movingId).toBeDefined();
+
+    expect(store.beginDrag(movingId!).ok).toBe(true);
+    expect(store.updateDrag({ x: 158, y: 165 }, { disableSnap: true }).ok).toBe(true);
+    expect(store.endDrag().ok).toBe(true);
+
+    const after = store.getState().scene.nodes[movingId!];
+    expect(after.lineConstraintId).toBeNull();
+    expect(Math.abs(after.pos.x - 150)).toBeGreaterThan(1);
+  });
+
   it('releases a line-constrained pivot when dragged mostly normal to the line', () => {
     const store = createSceneStore();
     store.addStick({ x: 100, y: 120 }, { x: 200, y: 120 });
@@ -626,6 +645,30 @@ describe('createSceneStore', () => {
     expect(constrainedNode!.pos.x).toBeCloseTo(150, 1);
   });
 
+  it('does not snap a new stick endpoint to nearby constraints when snap is disabled on release', () => {
+    const store = createSceneStore();
+
+    expect(store.beginLine({ x: 150, y: 40 }).ok).toBe(true);
+    expect(store.endLine({ x: 150, y: 220 }).ok).toBe(true);
+
+    expect(store.beginStick({ x: 60, y: 110 }).ok).toBe(true);
+    expect(store.endStick({ x: 158, y: 118 }, { disableSnap: true }).ok).toBe(true);
+
+    const state = store.getState();
+    const constrainedNode = Object.values(state.scene.nodes).find((node) => node.lineConstraintId);
+    expect(constrainedNode).toBeUndefined();
+
+    const endpoint = Object.values(state.scene.nodes).reduce((best, node) => {
+      if (!best) {
+        return node;
+      }
+      return distance(node.pos, { x: 158, y: 118 }) < distance(best.pos, { x: 158, y: 118 }) ? node : best;
+    }, null as (typeof state.scene.nodes)[string] | null);
+    expect(endpoint).toBeDefined();
+    expect(endpoint!.pos.x).toBeCloseTo(158, 1);
+    expect(endpoint!.pos.y).toBeCloseTo(118, 1);
+  });
+
   it('creates a hinge when a new stick endpoint lands on the interior of an existing stick', () => {
     const store = createSceneStore();
 
@@ -662,6 +705,21 @@ describe('createSceneStore', () => {
     const hingeNode = state.scene.nodes[attachment.nodeId];
     expect(hingeNode).toBeDefined();
     expect(hingeNode.pos.y).toBeCloseTo(120, 1);
+  });
+
+  it('does not create an interior hinge when snap is disabled while resizing a stick endpoint', () => {
+    const store = createSceneStore();
+
+    expect(store.addStick({ x: 100, y: 120 }, { x: 320, y: 120 }).ok).toBe(true);
+    expect(store.addStick({ x: 60, y: 210 }, { x: 120, y: 260 }).ok).toBe(true);
+
+    expect(store.tryHandleStickToolClick({ x: 90, y: 235 }).ok).toBe(true);
+    expect(store.tryBeginSelectedStickResizeAt({ x: 120, y: 260 }).ok).toBe(true);
+    expect(store.updateSelectedStickResize({ x: 212, y: 124 }).ok).toBe(true);
+    expect(store.endSelectedStickResize({ disableSnap: true }).ok).toBe(true);
+
+    const state = store.getState();
+    expect(Object.keys(state.scene.attachments)).toHaveLength(0);
   });
 
   it('keeps an interior attachment hinge centered on the host stick during motion', () => {

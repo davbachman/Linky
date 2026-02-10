@@ -531,6 +531,30 @@ describe('App integration', () => {
     expect(afterSecondDrag.nodes[moving!.id].pos.x).toBeCloseTo(150, 1);
   });
 
+  it('disables line snapping while shift is held during drag', () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId('tool-stick'));
+    drawStick(100, 120, 220, 120, 1);
+
+    fireEvent.click(screen.getByTestId('tool-line'));
+    drawLine(150, 40, 150, 220, 2);
+    fireEvent.click(screen.getByTestId('tool-line'));
+
+    const target = canvas();
+    const before = parseScene();
+    const moving = Object.values(before.nodes).find((node) => node.pos.x > 150);
+    expect(moving).toBeDefined();
+
+    fireEvent.pointerDown(target, { clientX: moving!.pos.x, clientY: moving!.pos.y, pointerId: 3 });
+    fireEvent.pointerMove(target, { clientX: 158, clientY: 165, pointerId: 3, shiftKey: true });
+    fireEvent.pointerUp(target, { clientX: 158, clientY: 165, pointerId: 3, shiftKey: true });
+
+    const after = parseScene().nodes[moving!.id];
+    expect(after.lineConstraintId).toBeNull();
+    expect(Math.abs(after.pos.x - 150)).toBeGreaterThan(1);
+  });
+
   it('releases line constraints when dragging mostly normal to the line', () => {
     render(<App />);
 
