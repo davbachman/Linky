@@ -2,6 +2,8 @@
 
 Interactive linkage builder and simulator for creating rigid stick mechanisms with anchors, constraints, and drawing pens.
 
+Live app: [https://davbachman.github.io/Linky/](https://davbachman.github.io/Linky/)
+
 ## What You Can Do
 
 - Build mechanisms from rigid sticks and pivots.
@@ -12,22 +14,6 @@ Interactive linkage builder and simulator for creating rigid stick mechanisms wi
 - Drag pivots to pose or excite the mechanism.
 - Run physics (`Play`) and stop it (`Stop`).
 - Add pens to pivots and draw trajectories while physics is running.
-
-## Run Locally
-
-Requirements:
-
-- Node.js 18+ (Node 20 recommended)
-- npm
-
-Install and start:
-
-```bash
-npm install
-npm run dev
-```
-
-Then open the local URL shown by Vite (usually [http://localhost:5173](http://localhost:5173)).
 
 ## User Guide
 
@@ -117,16 +103,6 @@ Behavior:
 - Build stable mechanisms by anchoring at least one pivot.
 - If dragging feels constrained, check whether the pivot is attached to a line or stick interior.
 - Use `Shift` to place or move a point freely without snap behavior.
-
-## Development
-
-Useful commands:
-
-```bash
-npm run dev
-npm run build
-npm test
-```
 
 ## GitHub Pages
 
