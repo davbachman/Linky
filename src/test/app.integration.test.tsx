@@ -689,4 +689,49 @@ describe('App integration', () => {
     expect(stick.restLength).toBeLessThan(90);
   });
 
+  it('zooms with two-finger pinch on touch and maps creation using zoomed world coordinates', () => {
+    render(<App />);
+
+    const target = canvas();
+    fireEvent.pointerDown(target, {
+      clientX: 360,
+      clientY: 300,
+      pointerId: 70,
+      pointerType: 'touch'
+    });
+    fireEvent.pointerDown(target, {
+      clientX: 540,
+      clientY: 300,
+      pointerId: 71,
+      pointerType: 'touch'
+    });
+    fireEvent.pointerMove(target, {
+      clientX: 660,
+      clientY: 300,
+      pointerId: 71,
+      pointerType: 'touch'
+    });
+    fireEvent.pointerUp(target, {
+      clientX: 660,
+      clientY: 300,
+      pointerId: 71,
+      pointerType: 'touch'
+    });
+    fireEvent.pointerUp(target, {
+      clientX: 360,
+      clientY: 300,
+      pointerId: 70,
+      pointerType: 'touch'
+    });
+
+    fireEvent.click(screen.getByTestId('tool-stick'));
+    drawStick(200, 200, 300, 200, 72);
+
+    const scene = parseScene();
+    const stick = Object.values(scene.sticks)[0];
+    expect(stick).toBeDefined();
+    expect(stick.restLength).toBeGreaterThan(15);
+    expect(stick.restLength).toBeLessThan(90);
+  });
+
 });

@@ -37,6 +37,13 @@ type CameraState = {
 };
 
 type InteractionMode = 'stick' | 'drag' | 'resize-stick' | 'line' | 'resize-line' | 'pan' | null;
+type PinchGesture = {
+  pointerA: number;
+  pointerB: number;
+  initialDistance: number;
+  initialZoom: number;
+  worldAtCenter: Vec2;
+};
 
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 5;
@@ -65,6 +72,17 @@ function screenToWorld(point: Vec2, camera: CameraState): Vec2 {
   };
 }
 
+function distanceBetween(a: Vec2, b: Vec2): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function midpoint(a: Vec2, b: Vec2): Vec2 {
+  return {
+    x: (a.x + b.x) * 0.5,
+    y: (a.y + b.y) * 0.5
+  };
+}
+
 export function LinkageCanvas({
   store,
   scene,
@@ -83,6 +101,8 @@ export function LinkageCanvas({
   const panDragStartRef = useRef<{ pointer: Vec2; pan: Vec2 } | null>(null);
   const spacePressedRef = useRef(false);
   const cameraRef = useRef<CameraState>({ zoom: 1, pan: { x: 0, y: 0 } });
+  const touchPointsRef = useRef<Map<number, Vec2>>(new Map());
+  const pinchGestureRef = useRef<PinchGesture | null>(null);
   const [viewport, setViewport] = useState({ width: 900, height: 600 });
   const [camera, setCamera] = useState<CameraState>({ zoom: 1, pan: { x: 0, y: 0 } });
 
@@ -145,6 +165,8 @@ export function LinkageCanvas({
 
     const handleWindowBlur = (): void => {
       spacePressedRef.current = false;
+      touchPointsRef.current.clear();
+      pinchGestureRef.current = null;
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -209,10 +231,107 @@ export function LinkageCanvas({
     }
   }, [store, tool]);
 
+  const updatePinchCamera = useCallback((gesture: PinchGesture): boolean => {
+    const pointA = touchPointsRef.current.get(gesture.pointerA);
+    const pointB = touchPointsRef.current.get(gesture.pointerB);
+    if (!pointA || !pointB) {
+      return false;
+    }
+
+    const center = midpoint(pointA, pointB);
+    const pinchDistance = Math.max(1, distanceBetween(pointA, pointB));
+    const zoomScale = pinchDistance / gesture.initialDistance;
+    const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, gesture.initialZoom * zoomScale));
+    const nextPanX = center.x - gesture.worldAtCenter.x * nextZoom;
+    const nextPanY = center.y - gesture.worldAtCenter.y * nextZoom;
+
+    setCamera((previous) => {
+      if (
+        Math.abs(previous.zoom - nextZoom) < 1e-6 &&
+        Math.abs(previous.pan.x - nextPanX) < 1e-6 &&
+        Math.abs(previous.pan.y - nextPanY) < 1e-6
+      ) {
+        return previous;
+      }
+      return {
+        zoom: nextZoom,
+        pan: {
+          x: nextPanX,
+          y: nextPanY
+        }
+      };
+    });
+    return true;
+  }, []);
+
+  const beginPinchInteraction = useCallback(
+    (canvas: HTMLCanvasElement): void => {
+      if (touchPointsRef.current.size < 2) {
+        return;
+      }
+      if (activeInteractionRef.current && activeInteractionRef.current !== 'pan') {
+        return;
+      }
+
+      const touches = Array.from(touchPointsRef.current.entries());
+      const [firstTouch, secondTouch] = touches;
+      if (!firstTouch || !secondTouch) {
+        return;
+      }
+
+      if (activeInteractionRef.current === 'pan' && activePointerIdRef.current !== null) {
+        try {
+          canvas.releasePointerCapture(activePointerIdRef.current);
+        } catch {
+          // Ignore release failures if the pointer is no longer captured.
+        }
+      }
+
+      activePointerIdRef.current = null;
+      activeInteractionRef.current = null;
+      panDragStartRef.current = null;
+
+      const [pointerA, pointA] = firstTouch;
+      const [pointerB, pointB] = secondTouch;
+      const center = midpoint(pointA, pointB);
+      const cameraNow = cameraRef.current;
+      pinchGestureRef.current = {
+        pointerA,
+        pointerB,
+        initialDistance: Math.max(1, distanceBetween(pointA, pointB)),
+        initialZoom: cameraNow.zoom,
+        worldAtCenter: screenToWorld(center, cameraNow)
+      };
+      updatePinchCamera(pinchGestureRef.current);
+    },
+    [updatePinchCamera]
+  );
+
   const handlePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current;
       if (!canvas) {
+        return;
+      }
+
+      const screenPoint = getCanvasPoint(event, canvas);
+
+      if (event.pointerType === 'touch') {
+        touchPointsRef.current.set(event.pointerId, screenPoint);
+        if (touchPointsRef.current.size >= 2) {
+          event.preventDefault();
+          beginPinchInteraction(canvas);
+          if (pinchGestureRef.current) {
+            return;
+          }
+        }
+      }
+
+      if (
+        event.pointerType === 'touch' &&
+        activePointerIdRef.current !== null &&
+        activePointerIdRef.current !== event.pointerId
+      ) {
         return;
       }
 
@@ -228,8 +347,6 @@ export function LinkageCanvas({
         };
         canvas.setPointerCapture(event.pointerId);
       };
-
-      const screenPoint = getCanvasPoint(event, canvas);
       const panWithMiddleButton = event.button === 1;
       const panWithSpaceDrag = event.button === 0 && spacePressedRef.current;
       if (panWithMiddleButton || panWithSpaceDrag) {
@@ -330,7 +447,7 @@ export function LinkageCanvas({
         }
       }
     },
-    [store, tool]
+    [beginPinchInteraction, store, tool]
   );
 
   const handleContextMenu = useCallback(
@@ -388,11 +505,25 @@ export function LinkageCanvas({
       if (!canvas) {
         return;
       }
+
+      const screenPoint = getCanvasPoint(event, canvas);
+
+      if (event.pointerType === 'touch') {
+        if (touchPointsRef.current.has(event.pointerId)) {
+          touchPointsRef.current.set(event.pointerId, screenPoint);
+        }
+        const pinchGesture = pinchGestureRef.current;
+        if (pinchGesture) {
+          event.preventDefault();
+          updatePinchCamera(pinchGesture);
+          return;
+        }
+      }
+
       if (activePointerIdRef.current !== event.pointerId) {
         return;
       }
 
-      const screenPoint = getCanvasPoint(event, canvas);
       if (activeInteractionRef.current === 'pan') {
         const panStart = panDragStartRef.current;
         if (panStart) {
@@ -421,7 +552,7 @@ export function LinkageCanvas({
         store.updateDrag(point, { disableSnap: event.shiftKey });
       }
     },
-    [store]
+    [store, updatePinchCamera]
   );
 
   const finishInteraction = useMemo(
@@ -431,6 +562,25 @@ export function LinkageCanvas({
         if (!canvas) {
           return;
         }
+
+        if (event.pointerType === 'touch') {
+          touchPointsRef.current.delete(event.pointerId);
+          const pinchGesture = pinchGestureRef.current;
+          if (pinchGesture) {
+            const isPinchPointer =
+              event.pointerId === pinchGesture.pointerA || event.pointerId === pinchGesture.pointerB;
+            const hasBothPointers =
+              touchPointsRef.current.has(pinchGesture.pointerA) &&
+              touchPointsRef.current.has(pinchGesture.pointerB);
+            if (!hasBothPointers) {
+              pinchGestureRef.current = null;
+            }
+            if (isPinchPointer) {
+              return;
+            }
+          }
+        }
+
         if (activePointerIdRef.current !== event.pointerId) {
           return;
         }
@@ -466,6 +616,25 @@ export function LinkageCanvas({
         if (!canvas) {
           return;
         }
+
+        if (event.pointerType === 'touch') {
+          touchPointsRef.current.delete(event.pointerId);
+          const pinchGesture = pinchGestureRef.current;
+          if (pinchGesture) {
+            const isPinchPointer =
+              event.pointerId === pinchGesture.pointerA || event.pointerId === pinchGesture.pointerB;
+            const hasBothPointers =
+              touchPointsRef.current.has(pinchGesture.pointerA) &&
+              touchPointsRef.current.has(pinchGesture.pointerB);
+            if (!hasBothPointers) {
+              pinchGestureRef.current = null;
+            }
+            if (isPinchPointer) {
+              return;
+            }
+          }
+        }
+
         if (activePointerIdRef.current !== event.pointerId) {
           return;
         }
