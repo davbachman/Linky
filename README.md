@@ -12,7 +12,7 @@ Live app: [https://davbachman.github.io/Linky/](https://davbachman.github.io/Lin
 - Add anchors (fixed pivots).
 - Add/edit/delete line constraints and snap pivots to them.
 - Drag pivots to pose or excite the mechanism.
-- Run physics (`Play`) and stop it (`Stop`).
+- Toggle physics simulation with `Play`.
 - Add pens to pivots and draw trajectories while physics is running.
 
 ## User Guide
@@ -23,9 +23,8 @@ Live app: [https://davbachman.github.io/Linky/](https://davbachman.github.io/Lin
 - `Anchor`: Convert an existing pivot to an anchor.
 - `Line`: Create and edit blue line constraints.
 - `Pen`: Assign/edit pens on non-anchor pivots.
-- `Play`: Enable physics simulation.
+- `Play`: Toggle physics simulation on/off.
 - `Clear`: Clear current pen drawing trails.
-- `Stop`: Disable physics simulation.
 
 ## Creating and Editing
 
@@ -77,7 +76,7 @@ Behavior:
 Behavior:
 
 - Pens draw only while physics is enabled.
-- `Stop` keeps existing drawing visible.
+- Toggling `Play` off keeps existing drawing visible.
 - Starting physics again clears old trails and starts a fresh drawing session.
 - `Clear` removes current drawing trails without removing pen assignments.
 - Press `Delete` with a selected pen to remove that pen assignment.
@@ -85,10 +84,10 @@ Behavior:
 ## Physics Mode
 
 - Click `Play` to enable simulation.
+- Click `Play` again to return to edit mode.
 - Click and drag a non-anchor pivot to inject motion.
 - Anchors remain fixed while physics is enabled.
 - Editing tools (`Stick`, `Anchor`, `Line`, `Pen`) are disabled while physics runs.
-- Click `Stop` to return to edit mode.
 
 ## Navigation Controls
 

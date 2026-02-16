@@ -346,18 +346,17 @@ describe('App integration', () => {
     expect(afterStick.restLength).not.toBeCloseTo(stick.restLength, 4);
   });
 
-  it('toggles play/stop physics buttons and disables edit tool buttons in play mode', () => {
+  it('toggles physics with the play button and disables edit tool buttons in play mode', () => {
     render(<App />);
 
     const playButton = screen.getByTestId('physics-play');
-    const stopButton = screen.getByTestId('physics-stop');
     const stickButton = screen.getByTestId('tool-stick') as HTMLButtonElement;
     const anchorButton = screen.getByTestId('tool-anchor') as HTMLButtonElement;
     const lineButton = screen.getByTestId('tool-line') as HTMLButtonElement;
     const penButton = screen.getByTestId('tool-pen') as HTMLButtonElement;
 
     expect(screen.getByTestId('physics-mode')).toHaveTextContent('stop');
-    expect(stopButton).toHaveAttribute('aria-pressed', 'true');
+    expect(playButton).toHaveAttribute('aria-pressed', 'false');
     expect(stickButton.disabled).toBe(false);
     expect(anchorButton.disabled).toBe(false);
     expect(lineButton.disabled).toBe(false);
@@ -366,15 +365,14 @@ describe('App integration', () => {
     fireEvent.click(playButton);
     expect(screen.getByTestId('physics-mode')).toHaveTextContent('play');
     expect(playButton).toHaveAttribute('aria-pressed', 'true');
-    expect(stopButton).toHaveAttribute('aria-pressed', 'false');
     expect(stickButton.disabled).toBe(true);
     expect(anchorButton.disabled).toBe(true);
     expect(lineButton.disabled).toBe(true);
     expect(penButton.disabled).toBe(true);
 
-    fireEvent.click(stopButton);
+    fireEvent.click(playButton);
     expect(screen.getByTestId('physics-mode')).toHaveTextContent('stop');
-    expect(stopButton).toHaveAttribute('aria-pressed', 'true');
+    expect(playButton).toHaveAttribute('aria-pressed', 'false');
     expect(stickButton.disabled).toBe(false);
     expect(anchorButton.disabled).toBe(false);
     expect(lineButton.disabled).toBe(false);

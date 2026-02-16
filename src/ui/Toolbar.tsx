@@ -65,21 +65,12 @@ export function Toolbar({
           data-testid="physics-play"
           aria-pressed={physicsEnabled}
           className={physicsEnabled ? 'active' : ''}
-          onClick={() => onSetPhysicsEnabled(true)}
+          onClick={() => onSetPhysicsEnabled(!physicsEnabled)}
         >
           <span aria-hidden="true">▶</span> Play
         </button>
         <button type="button" data-testid="physics-clear" onClick={onClearDrawing}>
           Clear
-        </button>
-        <button
-          type="button"
-          data-testid="physics-stop"
-          aria-pressed={!physicsEnabled}
-          className={!physicsEnabled ? 'active' : ''}
-          onClick={() => onSetPhysicsEnabled(false)}
-        >
-          <span aria-hidden="true">■</span> Stop
         </button>
       </div>
     </div>
