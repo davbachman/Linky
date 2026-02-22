@@ -648,6 +648,24 @@ describe('App integration', () => {
     expect(screen.getByTestId('stick-count')).toHaveTextContent('1');
   });
 
+  it('opens an About popup below-canvas button with author text and links', () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByTestId('about-button'));
+
+    expect(screen.getByTestId('about-modal')).toBeInTheDocument();
+    expect(screen.getByRole('dialog')).toHaveTextContent('Author: David Bachman, GPT 5.3 codex');
+
+    const repoLink = screen.getByRole('link', { name: 'Instructions and Code' });
+    expect(repoLink).toHaveAttribute('href', 'https://github.com/davbachman/Linky');
+
+    const substackLink = screen.getByRole('link', { name: 'Learn more about AI' });
+    expect(substackLink).toHaveAttribute('href', 'https://profbachman.substack.com');
+
+    fireEvent.click(screen.getByTestId('about-close'));
+    expect(screen.queryByTestId('about-modal')).not.toBeInTheDocument();
+  });
+
   it('pans the viewport with space-drag and keeps interaction points in world space', () => {
     render(<App />);
 

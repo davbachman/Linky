@@ -65,6 +65,9 @@ body {
 .canvas-wrap {
   min-height: 420px;
   padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
 }
 
 .linkage-canvas {
@@ -74,6 +77,77 @@ body {
   border: 1px solid #8f887a;
   background: #f8f8f6;
   touch-action: none;
+}
+
+.canvas-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.about-button {
+  border: 1px solid #4b463c;
+  background: #faf6ee;
+  color: #2b2a25;
+  padding: 0.45rem 0.85rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.about-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(20, 18, 14, 0.38);
+}
+
+.about-modal {
+  width: min(420px, 100%);
+  border: 1px solid #4b463c;
+  border-radius: 10px;
+  background: #fffaf2;
+  box-shadow: 0 12px 28px rgba(43, 42, 37, 0.28);
+  padding: 0.9rem;
+}
+
+.about-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.about-modal-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.about-close-button {
+  border: 1px solid #4b463c;
+  background: #faf6ee;
+  color: #2b2a25;
+  padding: 0.35rem 0.6rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.about-modal-text {
+  margin: 0 0 0.65rem;
+}
+
+.about-modal-links {
+  margin: 0.35rem 0;
+}
+
+.about-modal-links a {
+  color: #2253bf;
+  font-weight: 600;
 }
 
 .statusbar {
@@ -135,7 +209,7 @@ body {
 
 @media (max-width: 860px) {
   .linkage-canvas {
-    height: calc(100vh - 210px);
+    height: calc(100vh - 240px);
   }
 
   .statusbar {

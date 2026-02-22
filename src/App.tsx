@@ -37,6 +37,7 @@ export default function App({ store }: AppProps): JSX.Element {
   const sceneStore = store ?? localStoreRef.current!;
   const version = useStoreVersion(sceneStore);
   const [penMenu, setPenMenu] = useState<PenContextMenuState | null>(null);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const state = sceneStore.getState();
 
   const nodeCount = Object.keys(state.scene.nodes).length;
@@ -161,6 +162,23 @@ export default function App({ store }: AppProps): JSX.Element {
     };
   }, [sceneStore, state.physics.enabled]);
 
+  useEffect(() => {
+    if (!aboutOpen) {
+      return;
+    }
+
+    const handleEscape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setAboutOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [aboutOpen]);
+
   return (
     <div className="app-shell">
       <Toolbar
@@ -207,6 +225,19 @@ export default function App({ store }: AppProps): JSX.Element {
             });
           }}
         />
+        <div className="canvas-actions">
+          <button
+            type="button"
+            data-testid="about-button"
+            className="about-button"
+            onClick={() => {
+              setPenMenu(null);
+              setAboutOpen(true);
+            }}
+          >
+            About
+          </button>
+        </div>
       </div>
 
       {penMenu && selectedPen ? (
@@ -241,6 +272,60 @@ export default function App({ store }: AppProps): JSX.Element {
           >
             {selectedPen.enabled ? 'Disable pen' : 'Enable pen'}
           </button>
+        </div>
+      ) : null}
+
+      {aboutOpen ? (
+        <div
+          className="about-modal-overlay"
+          data-testid="about-overlay"
+          onClick={() => {
+            setAboutOpen(false);
+          }}
+        >
+          <div
+            className="about-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="about-modal-title"
+            data-testid="about-modal"
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <div className="about-modal-header">
+              <h2 id="about-modal-title">About</h2>
+              <button
+                type="button"
+                className="about-close-button"
+                data-testid="about-close"
+                onClick={() => {
+                  setAboutOpen(false);
+                }}
+              >
+                Close
+              </button>
+            </div>
+            <p className="about-modal-text">Author: David Bachman, GPT 5.3 codex</p>
+            <p className="about-modal-links">
+              <a
+                href="https://github.com/davbachman/Linky"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Instructions and Code
+              </a>
+            </p>
+            <p className="about-modal-links">
+              <a
+                href="https://profbachman.substack.com"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Learn more about AI
+              </a>
+            </p>
+          </div>
         </div>
       ) : null}
 
