@@ -4,7 +4,7 @@ Interactive linkage builder and simulator for creating rigid stick mechanisms wi
 
 Live app: [https://davbachman.github.io/Linky/](https://davbachman.github.io/Linky/)
 
-Created by David Bachman with GPT-5 Codex
+Created by David Bachman with GPT-5.4
 
 To learn more about David Bachman and his work visit https://pzacad.pitzer.edu/~dbachman/ and subscribe to his AI substack *Entropy Bonus* at https://profbachman.substack.com
 
