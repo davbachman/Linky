@@ -6,7 +6,7 @@ Live app: [https://davbachman.github.io/Linky/](https://davbachman.github.io/Lin
 
 Created by David Bachman with GPT-5 Codex
 
-To learn more about David Bachman and his work visit https://pzacad.pitzer.edu/~dbachman/ and subscribe to his AI substack *Entropy Bonus* at profbachman.substack.com
+To learn more about David Bachman and his work visit https://pzacad.pitzer.edu/~dbachman/ and subscribe to his AI substack *Entropy Bonus* at https://profbachman.substack.com
 
 ## What You Can Do
 
